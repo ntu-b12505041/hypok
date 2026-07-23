@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hypok-ecg"
+version = "0.2.0"
+description = "Research-grade ECG classification of hypokalemia, normokalemia, and hyperkalemia."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "HypoK ECG Research Project"}]
+dependencies = [
+  "duckdb>=1.1",
+  "matplotlib>=3.8",
+  "numpy>=1.26",
+  "pandas>=2.1",
+  "pyyaml>=6.0",
+  "scikit-learn>=1.4",
+  "scipy>=1.11",
+  "seaborn>=0.13",
+  "tabulate>=0.9",
+  "torch>=2.2",
+  "tqdm>=4.66",
+  "wfdb>=4.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.5",
+]
+foundation = [
+  "huggingface-hub>=0.25",
+]
+
+[project.scripts]
+hypok-ecg = "hypok_ecg.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

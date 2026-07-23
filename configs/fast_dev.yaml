@@ -1,0 +1,107 @@
+project:
+  name: "HypoK ECG Fast Development"
+  seed: 20260723
+  output_dir: "outputs/fast_dev"
+
+data:
+  ecg_root: "/path/to/mimic-iv-ecg-demo"
+  clinical_root: "/path/to/mimic-iv-demo"
+  ecg_index_csv: "data/interim/demo_ecg_index.csv"
+  cohort_csv: "data/processed/demo_pairs.csv"
+  split_csv: "data/processed/demo_pairs_split.csv"
+  mimic_ecg_version: "demo"
+  mimic_clinical_version: "demo"
+  lab_window_minutes: 120
+  include_whole_blood: true
+  potassium_itemids:
+    serum: [50971]
+    whole_blood: [50822, 52452]
+  min_potassium: 1.5
+  max_potassium: 10.0
+  prefer_lab_before_ecg: true
+  require_12_leads: true
+  lead_order: ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"]
+
+labels:
+  hypokalemia_upper: 3.5
+  hyperkalemia_lower: 5.5
+  hypokalemia_inclusive: false
+  hyperkalemia_inclusive: true
+  names: ["HypoK", "NK", "HyperK"]
+
+split:
+  train_ratio: 0.70
+  validation_ratio: 0.15
+  test_ratio: 0.15
+  group_column: "subject_id"
+  label_column: "label_id"
+
+preprocess:
+  target_sampling_rate: 100
+  duration_seconds: 10
+  bandpass_low_hz: 0.5
+  bandpass_high_hz: 40.0
+  notch_hz: 60.0
+  notch_quality_factor: 30.0
+  clip_millivolts: 5.0
+  remove_baseline: true
+  apply_notch: false
+  normalization: "none"
+  profile: "standard"
+
+augmentation:
+  enabled: false
+  gaussian_noise_std_millivolts: 0.0
+  max_time_shift_seconds: 0.0
+  lead_dropout_probability: 0.0
+  amplitude_scale_range: [1.0, 1.0]
+
+model:
+  name: "se_resnet1d_multitask"
+  input_leads: 12
+  base_channels: 16
+  stage_blocks: [1, 1, 1, 1]
+  kernel_size: 7
+  dropout: 0.10
+  se_reduction: 8
+  num_classes: 3
+  potassium_center: 4.3
+  potassium_scale: 1.0
+  pretrained_checkpoint: null
+  freeze_backbone_epochs: 0
+
+training:
+  device: "auto"
+  epochs: 2
+  batch_size: 8
+  num_workers: 0
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  optimizer: "adamw"
+  scheduler: "cosine"
+  warmup_epochs: 0
+  mixed_precision: false
+  gradient_clip_norm: 1.0
+  early_stopping_patience: 2
+  monitor: "val_macro_auroc"
+  class_weight_method: "effective_number"
+  effective_number_beta: 0.999
+  label_smoothing: 0.0
+  loss_weights:
+    classification: 1.0
+    ordinal: 0.30
+    regression: 0.20
+
+calibration:
+  temperature_scaling: true
+  threshold_grid_size: 51
+  target_recall: 0.85
+  target_specificity: 0.85
+  selection_metric: "minimum_recall_specificity"
+
+evaluation:
+  bootstrap_iterations: 100
+  bootstrap_confidence_level: 0.95
+  bootstrap_unit: "subject_id"
+  save_predictions: true
+  decision_curve: false
