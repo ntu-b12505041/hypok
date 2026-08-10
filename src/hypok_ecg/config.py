@@ -39,6 +39,16 @@ def validate_config(config: dict[str, Any]) -> None:
     if low >= high:
         raise ValueError("Hypokalemia threshold must be below hyperkalemia threshold")
 
+    cohort_source = str(config["data"].get("cohort_source", "clinical")).lower()
+    if cohort_source not in {"clinical", "precomputed"}:
+        raise ValueError("data.cohort_source must be 'clinical' or 'precomputed'")
+    if cohort_source == "precomputed" and not config["data"].get(
+        "precomputed_cohort_csv"
+    ):
+        raise ValueError(
+            "data.precomputed_cohort_csv is required when cohort_source=precomputed"
+        )
+
     model_name = config["model"]["name"]
     if model_name not in {"se_resnet1d_multitask", "ecgfounder_multitask"}:
         raise ValueError(f"Unsupported model.name: {model_name}")

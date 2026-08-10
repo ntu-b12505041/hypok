@@ -6,11 +6,20 @@ project:
 # This config intentionally points to the exact same cohort and split CSV as
 # configs/mimic.yaml. Do not generate a new split for the comparison model.
 data:
+  cohort_source: "precomputed"
+  precomputed_cohort_csv: "data/raw/hyperkalemia_data.csv"
+  precomputed_ecg_time_tolerance_seconds: 1
+  precomputed_matching_assumption:
+    serum_itemid: 50971
+    lab_window_minutes: 60
+    select_nearest: true
+    tie_prefer_before_ecg: true
   ecg_root: "/path/to/mimic-iv-ecg/1.0"
+  # Not read while cohort_source=precomputed; retained for optional raw reproduction.
   clinical_root: "/path/to/mimiciv/3.1"
   ecg_index_csv: "data/interim/ecg_index.csv"
-  cohort_csv: "data/processed/ecg_potassium_pairs.csv"
-  split_csv: "data/processed/ecg_potassium_pairs_split.csv"
+  cohort_csv: "data/processed/precomputed_ecg_potassium_cohort.csv"
+  split_csv: "data/processed/precomputed_ecg_potassium_cohort_split.csv"
   waveform_cache_dir: null
   mimic_ecg_version: "1.0"
   mimic_clinical_version: "3.1"
