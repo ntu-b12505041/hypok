@@ -11,8 +11,10 @@ recall 與 specificity 都嚴格大於 0.85？
 ## 資料與版本
 
 - MIMIC-IV-ECG v1.0：WFDB 12 導程、10 秒、500 Hz ECG。
-- MIMIC-IV Clinical v3.1：`hosp/labevents` 與 `hosp/d_labitems`。
-- Primary potassium：血液 chemistry 的 `itemid=50971`。
+- 上游提供的 precomputed cohort：聲明源自 MIMIC-IV Clinical v3.1，並假設
+  primary potassium 為 blood chemistry `itemid=50971`。
+- 因缺少 `potassium_time`、`itemid`、`labevent_id` 與 `delta_minutes`，本專案
+  無法獨立重現或驗證上游 ECG–K⁺ 配對；此限制必須在報告中揭露。
 - Secondary sensitivity analysis：whole-blood `50822`、`52452`；啟用前由
   `d_labitems` 自動檢查名稱、fluid 與 category。
 
@@ -21,15 +23,15 @@ MIMIC-IV-ECG 的 `subject_id` 可與 Clinical 對接，且相對於同一病人�
 
 ## 納入、排除與配對
 
-主要分析：
+目前主要分析：
 
-1. ECG 可讀、12 導程、具 acquisition time。
-2. K⁺ 數值介於 1.5–10.0 mmol/L，排除顯然無效值。
-3. 同一 `subject_id` 的血清 K⁺ 在 ECG 前後 60 分鐘內。
-4. 每個 `study_id` 只取絕對時間差最小的 K⁺。
-5. 距離相同時優先 ECG 前的檢驗，再依 `labevent_id` 決定。
-6. 不把同一 K⁺ 重複限制為只能配一張 ECG；這符合「每張 ECG 的最近狀態」，
-   但所有重複 ECG 均在同一病人的同一 split，bootstrap 也以病人為單位。
+1. `study_id` 唯一，路徑與 study ID 一致。
+2. 對應 WFDB header 與 signal file 存在且可讀。
+3. CSV 的 ECG time 與 header acquisition time 一致。
+4. `n_sig=12` 且導程集合完整為 I、II、III、aVR、aVL、aVF、V1–V6。
+5. K⁺ 數值介於 1.5–10.0 mmol/L，提供標籤與固定門檻重新計算結果一致。
+6. 上游 ±60 分鐘、最近檢驗與同距離優先 ECG 前檢驗規則視為假設，而非本專案
+   已驗證的處理步驟。
 
 建議正式研究再加入成人限制、pacemaker/ICD 排除，以及 ECG 品質排除。這些資訊
 必須以可重現 SQL 加入，不能人工挑選。

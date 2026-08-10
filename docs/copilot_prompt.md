@@ -8,7 +8,7 @@
 `docs/research_protocol.md`、`docs/ecgfounder_finetuning.md`、
 `configs/mimic.yaml` 與 `configs/ecgfounder_finetune.yaml`，再開始操作。
 
-研究任務是使用 MIMIC-IV-ECG v1.0 與 MIMIC-IV Clinical v3.1，依鄰近血清鉀
+研究任務是使用 MIMIC-IV-ECG v1.0 波形與提供的 precomputed ECG–血鉀 CSV，
 把 12-lead ECG 分成 HypoK（K<3.5）、NK（3.5≤K<5.5）、HyperK（K≥5.5）。
 需要比較兩個模型：
 
@@ -25,9 +25,9 @@
 3. 建立 virtual environment，安裝 `pip install -e ".[dev,foundation]"`。
 4. 請使用者提供或確認：
    - MIMIC-IV-ECG v1.0 root
-   - MIMIC-IV Clinical v3.1 root
-   如果路徑未知，不要猜測，也不要下載受限 Clinical 資料。
-5. 將兩個 config 的 `ecg_root`、`clinical_root` 改成相同的正確路徑，確認兩者
+   - `data/raw/hyperkalemia_data.csv`
+   如果路徑未知，不要猜測，也不要下載或公開受 DUA 約束的資料。
+5. 將兩個 config 的 `ecg_root` 改成相同的正確路徑，確認兩者
    的 `cohort_csv` 與 `split_csv` 完全相同。
 6. 執行 `python scripts/download_ecgfounder.py`，記錄輸出的 SHA-256，填入
    `configs/ecgfounder_finetune.yaml` 的 `model.checkpoint_sha256`。
@@ -36,10 +36,9 @@
    - `hypok-ecg validate-config --config configs/mimic.yaml`
    - `hypok-ecg validate-config --config configs/ecgfounder_finetune.yaml`
 8. 如果 cohort 尚未建立，只用 baseline config 建立一次：
-   - `hypok-ecg index-ecg --config configs/mimic.yaml --workers 16`
-   - `hypok-ecg build-cohort --config configs/mimic.yaml`
+   - `hypok-ecg build-cohort --config configs/mimic.yaml --workers 16`
    - `hypok-ecg split --config configs/mimic.yaml`
-   檢查 cohort summary、每類病人數、時間差及 patient leakage。不要為
+   檢查 waveform/header error、12 導程排除、每類病人數及 patient leakage。不要為
    ECGFounder 重新產生 split。
 9. 在 GPU 上依序訓練與評估：
    - `hypok-ecg train --config configs/mimic.yaml`
@@ -70,7 +69,7 @@
 - ECGFounder 必須維持 `profile: ecgfounder_official`，包括 500 Hz、10 秒、
   50 Hz notch、0.67–40 Hz bandpass、0.4 秒 median baseline removal 與
   global z-score，不可任意改成 baseline preprocessing。
-- 若 GPU、checkpoint 或 MIMIC Clinical 權限不足，停止正式訓練並明確回報
+- 若 GPU、checkpoint、配對 CSV 或對應 ECG 波形不足，停止正式訓練並明確回報
   blocker；仍可完成不需 GPU 的測試，但不得產生假結果。
 - 不得將 MIMIC 衍生 cohort、逐筆 predictions 或 checkpoint 推到公開 GitHub。
 

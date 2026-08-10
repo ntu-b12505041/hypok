@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -10,6 +12,7 @@ from hypok_ecg.calibration import tune_ordered_thresholds
 from hypok_ecg.config import load_config
 from hypok_ecg.labels import PotassiumLabeler
 from hypok_ecg.metrics import classification_metrics, target_is_met
+from hypok_ecg.mimic import build_precomputed_cohort, normalize_precomputed_cohort
 from hypok_ecg.preprocess import ECGPreprocessor
 from hypok_ecg.splits import make_patient_level_splits
 
@@ -76,6 +79,84 @@ class ConfigurationTests(unittest.TestCase):
         founder = load_config(root / "configs" / "ecgfounder_finetune.yaml")
         self.assertEqual(baseline["data"]["split_csv"], founder["data"]["split_csv"])
         self.assertEqual(founder["preprocess"]["target_sampling_rate"], 500)
+
+
+class PrecomputedCohortTests(unittest.TestCase):
+    def _config(self):
+        root = Path(__file__).resolve().parents[1]
+        return load_config(root / "configs" / "mimic.yaml")
+
+    def test_schema_aliases_and_labels_are_normalized(self):
+        frame = pd.DataFrame(
+            {
+                "subject_id": [1, 2, 3],
+                "study_id": [401, 402, 403],
+                "ecg_time": ["2130-01-01 00:00:00"] * 3,
+                "path": ["files/p1/401", "files/p2/402.hea", "files/p3/403"],
+                "potassium_value": [3.4, 4.2, 5.5],
+                "k_label": ["HypoK", "NK", "HyperK"],
+            }
+        )
+        result = normalize_precomputed_cohort(frame, self._config())
+        self.assertEqual(result["record_path"].tolist()[1], "files/p2/402")
+        self.assertEqual(result["label_id"].tolist(), [0, 1, 2])
+
+    def test_inconsistent_provided_label_is_rejected(self):
+        frame = pd.DataFrame(
+            {
+                "subject_id": [1],
+                "study_id": [401],
+                "ecg_time": ["2130-01-01 00:00:00"],
+                "path": ["files/p1/401"],
+                "potassium_value": [5.8],
+                "k_label": ["NK"],
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "inconsistent"):
+            normalize_precomputed_cohort(frame, self._config())
+
+    def test_build_uses_only_selected_paths_and_keeps_complete_leads(self):
+        with TemporaryDirectory() as temporary:
+            temp = Path(temporary)
+            source = temp / "provided.csv"
+            output = temp / "processed" / "cohort.csv"
+            ecg_root = temp / "ecg"
+            ecg_root.mkdir()
+            pd.DataFrame(
+                {
+                    "subject_id": [1, 2, 3],
+                    "study_id": [401, 402, 403],
+                    "ecg_time": ["2130-01-01 00:00:00"] * 3,
+                    "path": ["files/p1/401", "files/p2/402", "files/p3/403"],
+                    "potassium_value": [3.4, 4.2, 5.5],
+                    "k_label": ["HypoK", "NK", "HyperK"],
+                }
+            ).to_csv(source, index=False)
+            config = self._config()
+            config["data"]["precomputed_cohort_csv"] = str(source)
+            config["data"]["cohort_csv"] = str(output)
+            config["data"]["ecg_root"] = str(ecg_root)
+            leads = config["data"]["lead_order"]
+
+            def fake_header(_root, row):
+                return {
+                    "subject_id": row["subject_id"],
+                    "study_id": row["study_id"],
+                    "record_path": row["record_path"],
+                    "ecg_time": "2130-01-01 00:00:00",
+                    "sampling_rate": 500.0,
+                    "signal_length": 5000,
+                    "n_sig": 12,
+                    "lead_names": "|".join(leads),
+                    "index_error": "",
+                }
+
+            with patch("hypok_ecg.mimic._read_header_row", side_effect=fake_header):
+                cohort, summary = build_precomputed_cohort(config, workers=2)
+            self.assertEqual(len(cohort), 3)
+            self.assertEqual(summary["header_errors"], 0)
+            self.assertEqual(set(cohort["label_id"]), {0, 1, 2})
+            self.assertTrue(output.exists())
 
 
 class MetricsTests(unittest.TestCase):

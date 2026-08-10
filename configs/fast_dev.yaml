@@ -4,6 +4,7 @@ project:
   output_dir: "outputs/fast_dev"
 
 data:
+  cohort_source: "clinical"
   ecg_root: "/path/to/mimic-iv-ecg-demo"
   clinical_root: "/path/to/mimic-iv-demo"
   ecg_index_csv: "data/interim/demo_ecg_index.csv"

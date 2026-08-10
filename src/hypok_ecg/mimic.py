@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 import numpy as np
@@ -38,6 +38,17 @@ def _read_header_row(ecg_root: Path, row: dict) -> dict:
     relative_no_ext = relative[:-4] if relative.endswith(".hea") else relative
     absolute_no_ext = ecg_root / relative_no_ext
     header = wfdb.rdheader(str(absolute_no_ext))
+    missing_signal_files = sorted(
+        {
+            str(file_name)
+            for file_name in header.file_name
+            if not (absolute_no_ext.parent / str(file_name)).is_file()
+        }
+    )
+    if missing_signal_files:
+        raise FileNotFoundError(
+            f"header references missing waveform files: {missing_signal_files}"
+        )
     base_date = header.base_date
     base_time = header.base_time
     if base_date is None or base_time is None:
@@ -107,6 +118,234 @@ def build_ecg_index(
     target.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(target, index=False)
     return frame
+
+
+def _normalize_precomputed_path(value: object) -> str:
+    path = str(value).strip().replace("\\", "/")
+    if path.endswith(".hea") or path.endswith(".dat"):
+        path = path[:-4]
+    parsed = PurePosixPath(path)
+    if not path or parsed.is_absolute() or ".." in parsed.parts:
+        raise ValueError(f"Unsafe or invalid relative ECG path: {value!r}")
+    return path
+
+
+def normalize_precomputed_cohort(frame: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """Validate and normalize a provided ECG-potassium cohort.
+
+    The source file is assumed to contain already matched potassium values. This
+    function validates its schema and labels, but cannot independently verify the
+    upstream laboratory matching without labevents and potassium timestamps.
+    """
+    aliases = {
+        "path": "record_path",
+        "potassium_value": "potassium",
+        "k_label": "label",
+    }
+    normalized = frame.rename(
+        columns={source: target for source, target in aliases.items() if target not in frame}
+    ).copy()
+    required = {"subject_id", "study_id", "ecg_time", "record_path", "potassium", "label"}
+    missing = required - set(normalized.columns)
+    if missing:
+        raise ValueError(f"Precomputed cohort is missing columns: {sorted(missing)}")
+    if normalized.empty:
+        raise ValueError("Precomputed cohort is empty")
+
+    for column in ("subject_id", "study_id"):
+        values = pd.to_numeric(normalized[column], errors="raise")
+        if values.isna().any() or not np.equal(values, np.floor(values)).all():
+            raise ValueError(f"{column} must contain finite integer identifiers")
+        normalized[column] = values.astype(np.int64)
+    normalized["potassium"] = pd.to_numeric(normalized["potassium"], errors="raise")
+    normalized["provided_ecg_time"] = pd.to_datetime(
+        normalized["ecg_time"], errors="raise"
+    )
+    normalized = normalized.drop(columns=["ecg_time"])
+    normalized["record_path"] = normalized["record_path"].map(
+        _normalize_precomputed_path
+    )
+    normalized["label"] = normalized["label"].astype(str).str.strip()
+
+    if normalized["study_id"].duplicated().any():
+        duplicates = int(normalized["study_id"].duplicated().sum())
+        raise ValueError(f"Precomputed cohort contains {duplicates} duplicate study_id values")
+    path_studies = normalized["record_path"].map(lambda value: PurePosixPath(value).name)
+    expected_paths = normalized["study_id"].astype(str)
+    if not path_studies.eq(expected_paths).all():
+        raise ValueError("Some ECG paths do not end with their study_id")
+
+    data_cfg = config["data"]
+    in_range = normalized["potassium"].between(
+        float(data_cfg["min_potassium"]),
+        float(data_cfg["max_potassium"]),
+        inclusive="both",
+    )
+    if not in_range.all():
+        raise ValueError(f"Precomputed cohort has {int((~in_range).sum())} out-of-range K values")
+
+    labeler = PotassiumLabeler.from_config(config)
+    normalized["label_id"] = labeler.transform(normalized["potassium"].to_numpy())
+    expected_labels = pd.Series(
+        labeler.label_names(normalized["label_id"].to_numpy()),
+        index=normalized.index,
+    )
+    mismatch = ~normalized["label"].eq(expected_labels)
+    if mismatch.any():
+        raise ValueError(
+            f"Precomputed cohort has {int(mismatch.sum())} labels inconsistent with K thresholds"
+        )
+    return normalized
+
+
+def _complete_standard_leads(lead_names: object, required_leads: list[str]) -> bool:
+    observed = str(lead_names).split("|")
+    return len(observed) == len(required_leads) and set(observed) == set(required_leads)
+
+
+def build_precomputed_cohort(
+    config: dict,
+    workers: int = 16,
+    limit: int | None = None,
+) -> tuple[pd.DataFrame, dict]:
+    """Prepare an externally matched cohort and validate its local ECG files."""
+    data_cfg = config["data"]
+    source_path = Path(data_cfg["precomputed_cohort_csv"]).expanduser().resolve()
+    output_path = Path(data_cfg["cohort_csv"]).expanduser().resolve()
+    ecg_root = Path(data_cfg["ecg_root"]).expanduser().resolve()
+    if not source_path.exists():
+        raise FileNotFoundError(f"Missing precomputed cohort: {source_path}")
+    if not ecg_root.exists():
+        raise FileNotFoundError(f"Missing ECG root: {ecg_root}")
+
+    source = pd.read_csv(source_path)
+    if limit is not None:
+        source = source.head(limit)
+    prepared = normalize_precomputed_cohort(source, config).reset_index(drop=True)
+    prepared["_source_row"] = np.arange(len(prepared), dtype=np.int64)
+    rows = prepared[["_source_row", "subject_id", "study_id", "record_path"]].to_dict(
+        "records"
+    )
+
+    def safe_read(row: dict) -> dict:
+        try:
+            result = _read_header_row(ecg_root, row)
+            result["_source_row"] = int(row["_source_row"])
+            return result
+        except Exception as exc:
+            return {
+                "_source_row": int(row["_source_row"]),
+                "subject_id": int(row["subject_id"]),
+                "study_id": int(row["study_id"]),
+                "record_path": str(row["record_path"]),
+                "ecg_time": "",
+                "sampling_rate": math.nan,
+                "signal_length": -1,
+                "n_sig": -1,
+                "lead_names": "",
+                "index_error": f"{type(exc).__name__}: {exc}",
+            }
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        indexed = list(
+            tqdm(
+                pool.map(safe_read, rows),
+                total=len(rows),
+                desc="Validating selected ECG files",
+            )
+        )
+    metadata = pd.DataFrame(indexed)
+    cohort = prepared.merge(
+        metadata.drop(columns=["subject_id", "study_id", "record_path"]),
+        on="_source_row",
+        how="left",
+        validate="one_to_one",
+    )
+    cohort["header_ecg_time"] = pd.to_datetime(cohort["ecg_time"], errors="coerce")
+    cohort["ecg_time_delta_seconds"] = (
+        cohort["header_ecg_time"] - cohort["provided_ecg_time"]
+    ).dt.total_seconds()
+
+    required_leads = list(data_cfg["lead_order"])
+    cohort["complete_standard_leads"] = cohort["lead_names"].map(
+        lambda value: _complete_standard_leads(value, required_leads)
+    )
+    readable = cohort["index_error"].fillna("").eq("")
+    tolerance = float(data_cfg.get("precomputed_ecg_time_tolerance_seconds", 1.0))
+    time_match = cohort["ecg_time_delta_seconds"].abs().le(tolerance)
+    complete_leads = cohort["n_sig"].eq(len(required_leads)) & cohort[
+        "complete_standard_leads"
+    ]
+
+    cohort["exclusion_reason"] = ""
+    cohort.loc[~readable, "exclusion_reason"] = "unreadable_or_missing_waveform"
+    cohort.loc[readable & ~time_match, "exclusion_reason"] = "ecg_time_mismatch"
+    if data_cfg.get("require_12_leads", True):
+        cohort.loc[readable & time_match & ~complete_leads, "exclusion_reason"] = (
+            "incomplete_standard_leads"
+        )
+    keep = cohort["exclusion_reason"].eq("")
+
+    audit_columns = [
+        "subject_id",
+        "study_id",
+        "record_path",
+        "provided_ecg_time",
+        "header_ecg_time",
+        "ecg_time_delta_seconds",
+        "n_sig",
+        "lead_names",
+        "index_error",
+        "exclusion_reason",
+    ]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    excluded_path = output_path.with_name(f"{output_path.stem}.excluded.csv")
+    cohort.loc[~keep, audit_columns].to_csv(excluded_path, index=False)
+
+    cohort = cohort.loc[keep].copy()
+    cohort["ecg_time"] = cohort["header_ecg_time"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    cohort["cohort_source"] = "precomputed_unverified_matching"
+    final_columns = [
+        "subject_id",
+        "study_id",
+        "record_path",
+        "ecg_time",
+        "sampling_rate",
+        "signal_length",
+        "n_sig",
+        "lead_names",
+        "potassium",
+        "label_id",
+        "label",
+        "cohort_source",
+    ]
+    cohort = cohort[final_columns].sort_values(
+        ["subject_id", "ecg_time", "study_id"]
+    )
+    cohort.to_csv(output_path, index=False)
+
+    labeler = PotassiumLabeler.from_config(config)
+    counts = cohort["label"].value_counts().reindex(labeler.names, fill_value=0)
+    summary = {
+        "cohort_source": "precomputed",
+        "matching_independently_verified": False,
+        "matching_assumption": data_cfg.get("precomputed_matching_assumption", {}),
+        "mimic_ecg_version": data_cfg["mimic_ecg_version"],
+        "mimic_clinical_version": data_cfg.get("mimic_clinical_version", "stated 3.1"),
+        "source_records": int(len(prepared)),
+        "header_errors": int((~readable).sum()),
+        "ecg_time_mismatches": int((readable & ~time_match).sum()),
+        "incomplete_standard_leads": int((readable & time_match & ~complete_leads).sum()),
+        "records": int(len(cohort)),
+        "subjects": int(cohort["subject_id"].nunique()),
+        "class_counts": {str(k): int(v) for k, v in counts.items()},
+        "class_prevalence": {
+            str(k): float(v / len(cohort)) if len(cohort) else 0.0 for k, v in counts.items()
+        },
+        "excluded_records_csv": str(excluded_path),
+    }
+    write_json(output_path.with_suffix(".summary.json"), summary)
+    return cohort, summary
 
 
 def _duckdb_reader_sql(path: Path) -> str:
@@ -284,3 +523,19 @@ def build_potassium_cohort(config: dict) -> tuple[pd.DataFrame, dict]:
     }
     write_json(output_path.with_suffix(".summary.json"), summary)
     return cohort, summary
+
+
+def build_cohort(
+    config: dict,
+    workers: int = 16,
+    limit: int | None = None,
+) -> tuple[pd.DataFrame, dict]:
+    """Build the configured cohort from Clinical tables or a precomputed CSV."""
+    source = str(config["data"].get("cohort_source", "clinical")).lower()
+    if source == "precomputed":
+        return build_precomputed_cohort(config, workers=workers, limit=limit)
+    if source == "clinical":
+        if limit is not None:
+            raise ValueError("--limit is supported only for a precomputed cohort")
+        return build_potassium_cohort(config)
+    raise ValueError(f"Unsupported data.cohort_source: {source}")

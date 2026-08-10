@@ -71,6 +71,6 @@ retrospective cohort analysis for accuracy and outcome prediction.**
 - [MIMIC-IV Clinical v3.1](https://physionet.org/content/mimiciv/3.1/)：
   credentialed access，需要 CITI training 與 DUA；提供 `labevents` 血鉀。
 
-我能檢閱上述公開全文／期刊頁面的內容，但不能存取非公開原始院內 cohort、作者
-未公開的 supplementary patient-level data，也沒有使用者的 credentialed
-MIMIC-IV Clinical 檔案。因此目前不能誠實產出真實訓練成績。
+目前主 workflow 使用提供的 precomputed ECG–K⁺ cohort，並明確標示其上游配對
+尚未由本專案獨立驗證。本工作環境沒有對應完整波形與 GPU，因此不能在此誠實
+產出真實訓練成績。

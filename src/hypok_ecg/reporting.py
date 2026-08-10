@@ -294,6 +294,22 @@ def create_validation_report(
         interval = f"{ci['lower']:.3f}–{ci['upper']:.3f}" if ci else "—"
         overall_rows.append(f"| {label} | {value:.3f} | {interval} |")
 
+    cohort_source = cohort_summary.get(
+        "cohort_source", config["data"].get("cohort_source", "clinical")
+    )
+    if cohort_source == "precomputed":
+        dataset_details = f"""- Cohort source: externally precomputed ECG–potassium pairs
+- Upstream matching independently verified in this project: **No**
+- Assumed upstream matching rule: `{cohort_summary.get('matching_assumption', config['data'].get('precomputed_matching_assumption', {}))}`
+- Local eligibility checks: WFDB files readable, ECG time agrees with header, and all 12 standard leads are present
+- Source records before local eligibility checks: {cohort_summary.get('source_records', 'Not available')}
+- Excluded unreadable/missing waveforms: {cohort_summary.get('header_errors', 'Not available')}
+- Excluded ECG-time mismatches: {cohort_summary.get('ecg_time_mismatches', 'Not available')}
+- Excluded incomplete/nonstandard leads: {cohort_summary.get('incomplete_standard_leads', 'Not available')}"""
+    else:
+        dataset_details = f"""- ECG–laboratory matching window: ±{config['data']['lab_window_minutes']} minutes
+- Potassium item IDs: `{cohort_summary.get('potassium_itemids', config['data']['potassium_itemids'])}`"""
+
     report = f"""# {title_prefix}ECG Dyskalemia Validation Report
 
 ## Executive summary
@@ -309,8 +325,7 @@ for every class. Final test status: **{status}**.
 
 - MIMIC-IV-ECG version: `{"synthetic schema; target " if synthetic else ""}{config['data']['mimic_ecg_version']}`
 - MIMIC-IV Clinical version: `{"synthetic schema; target " if synthetic else ""}{config['data']['mimic_clinical_version']}`
-- ECG–laboratory matching window: ±{config['data']['lab_window_minutes']} minutes
-- Potassium item IDs: `{cohort_summary.get('potassium_itemids', config['data']['potassium_itemids'])}`
+{dataset_details}
 - Paired records: {cohort_summary.get('records', 'Not available')}
 - Unique patients: {cohort_summary.get('subjects', 'Not available')}
 - Class counts: `{cohort_summary.get('class_counts', {})}`

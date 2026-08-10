@@ -7,7 +7,7 @@ from pathlib import Path
 from .comparison import compare_runs
 from .config import load_config
 from .evaluation import evaluate_model
-from .mimic import build_ecg_index, build_potassium_cohort
+from .mimic import build_cohort, build_ecg_index
 from .splits import write_splits
 from .training import train_model
 
@@ -27,11 +27,20 @@ def _parser() -> argparse.ArgumentParser:
     index = configured("index-ecg", "Index ECG timestamps from WFDB headers.")
     index.add_argument("--workers", type=int, default=16)
     index.add_argument("--limit", type=int)
-    configured("build-cohort", "Pair ECGs with nearby serum potassium tests.")
+    cohort = configured(
+        "build-cohort",
+        "Build from Clinical labs or validate an externally matched cohort.",
+    )
+    cohort.add_argument("--workers", type=int, default=16)
+    cohort.add_argument("--limit", type=int)
     configured("split", "Create leakage-safe patient-level data splits.")
     configured("train", "Train and calibrate the multitask SE-ResNet.")
     configured("evaluate", "Evaluate once on the locked test split.")
-    configured("run-all", "Run indexing, cohort construction, split, train, and test.")
+    run_all = configured(
+        "run-all", "Run cohort construction, split, training, and locked test evaluation."
+    )
+    run_all.add_argument("--workers", type=int, default=16)
+    run_all.add_argument("--limit", type=int)
     configured("validate-config", "Validate configuration without reading data.")
     compare = subparsers.add_parser(
         "compare", help="Create a paired scratch-vs-pretrained model comparison."
@@ -62,7 +71,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "validate-config":
         _print({"status": "ok", "config": str(Path(args.config).resolve())})
         return 0
-    if args.command in {"index-ecg", "run-all"}:
+    cohort_source = str(data.get("cohort_source", "clinical")).lower()
+    should_build_full_index = args.command == "index-ecg" or (
+        args.command == "run-all" and cohort_source == "clinical"
+    )
+    if should_build_full_index:
         frame = build_ecg_index(
             data["ecg_root"],
             data["ecg_index_csv"],
@@ -79,7 +92,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "index-ecg":
             return 0
     if args.command in {"build-cohort", "run-all"}:
-        _, summary = build_potassium_cohort(config)
+        _, summary = build_cohort(
+            config,
+            workers=getattr(args, "workers", 16),
+            limit=getattr(args, "limit", None),
+        )
         _print(summary)
         if args.command == "build-cohort":
             return 0

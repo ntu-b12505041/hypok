@@ -1,5 +1,20 @@
 # 資料欄位與配對規則
 
+## 目前主要輸入：預先配對 cohort
+
+| 提供欄位 | 專案欄位 | 用途 |
+|---|---|---|
+| `subject_id` | `subject_id` | 病人層級切分 |
+| `study_id` | `study_id` | 唯一 ECG 與 metadata 對照 |
+| `ecg_time` | `provided_ecg_time` | 與 WFDB header acquisition time 核對 |
+| `path` | `record_path` | 對應 `.hea/.dat` record base path |
+| `potassium_value` | `potassium` | 上游已配對的 K⁺ 標籤值 |
+| `k_label` | `label` | 必須與專案門檻重新計算結果一致 |
+
+此檔案未提供 `potassium_time`、`itemid`、`labevent_id` 或 `delta_minutes`，因此
+專案無法獨立驗證上游 ±60 分鐘最近檢驗規則。`build-cohort` 只驗證本地 ECG
+可讀性、時間、12 個標準導程、血鉀範圍和標籤一致性。
+
 ## 輸入
 
 ### ECG index
@@ -16,6 +31,9 @@
 | `index_error` | pipeline | 保留不可讀紀錄的稽核原因 |
 
 ### Clinical potassium
+
+以下是使用原始 Clinical workflow 重現配對時才需要的欄位；目前 precomputed
+workflow 不會讀取這些資料。
 
 | 欄位 | 來源 | 用途 |
 |---|---|---|

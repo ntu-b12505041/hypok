@@ -24,8 +24,7 @@ hypok-ecg validate-config --config configs/mimic.yaml
 ## 執行順序
 
 ```bash
-hypok-ecg index-ecg --config configs/mimic.yaml --workers 16
-hypok-ecg build-cohort --config configs/mimic.yaml
+hypok-ecg build-cohort --config configs/mimic.yaml --workers 16
 hypok-ecg split --config configs/mimic.yaml
 hypok-ecg train --config configs/mimic.yaml
 hypok-ecg evaluate --config configs/mimic.yaml
@@ -34,8 +33,8 @@ hypok-ecg evaluate --config configs/mimic.yaml
 先檢查 cohort summary：
 
 - 三類都有足夠病人；
-- `median_abs_time_delta_minutes` 合理；
-- `potassium_item_dictionary` 名稱與 fluid 正確；
+- `header_errors`、`ecg_time_mismatches` 與 `incomplete_standard_leads` 數量合理；
+- `matching_independently_verified` 必須如實記錄為 `false`；
 - train/validation/test 沒有 patient overlap；
 - test HyperK 病人數足以估計窄 CI。
 
