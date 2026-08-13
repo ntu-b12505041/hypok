@@ -10,6 +10,7 @@ import pandas as pd
 
 from hypok_ecg.calibration import tune_ordered_thresholds
 from hypok_ecg.config import load_config, validate_config
+from hypok_ecg.ecgfounder import _legacy_numpy_safe_globals
 from hypok_ecg.labels import PotassiumLabeler
 from hypok_ecg.metrics import classification_metrics, target_is_met
 from hypok_ecg.mimic import (
@@ -95,6 +96,20 @@ class ConfigurationTests(unittest.TestCase):
         config["sampling"]["majority_to_minority_total_ratio"] = 0
         with self.assertRaisesRegex(ValueError, "must be positive"):
             validate_config(config)
+
+
+class ECGFounderCheckpointTests(unittest.TestCase):
+    def test_legacy_numpy_allowlist_is_narrow(self):
+        safe_globals = _legacy_numpy_safe_globals()
+        names = {
+            item[1]
+            if isinstance(item, tuple)
+            else f"{item.__module__}.{item.__qualname__}"
+            for item in safe_globals
+        }
+        self.assertIn("numpy.core.multiarray.scalar", names)
+        self.assertIn("numpy.dtype", names)
+        self.assertNotIn("builtins.eval", names)
 
 
 class SamplingTests(unittest.TestCase):

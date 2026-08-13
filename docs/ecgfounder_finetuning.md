@@ -91,6 +91,10 @@ hypok-ecg compare \
 
 ## 公平比較規則
 
+PyTorch 2.6 之後預設採用 restricted `weights_only` unpickler。官方舊版
+checkpoint 含有 NumPy scalar/dtype metadata；專案只對這些 NumPy 型別使用局部
+allowlist，仍維持 `weights_only=True`，不會無條件執行任意 pickle object。
+
 1. 兩模型使用同一份 split CSV。
 2. 兩模型的 validation calibration 分開 fitting。
 3. 兩模型都只在鎖定後查看 test 一次。

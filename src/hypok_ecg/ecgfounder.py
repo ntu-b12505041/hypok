@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import numpy as np
+
 try:
     import torch
     import torch.nn as nn
@@ -294,6 +296,63 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _legacy_numpy_safe_globals() -> list:
+    """Allow only the NumPy scalar metadata used by the official checkpoint."""
+    scalar = np._core.multiarray.scalar
+    safe_globals = [
+        (scalar, "numpy.core.multiarray.scalar"),
+        (scalar, "numpy._core.multiarray.scalar"),
+        np.dtype,
+    ]
+    # NumPy dtype classes are constructed dynamically and are not returned by
+    # torch.serialization.get_unsafe_globals_in_checkpoint(). PyTorch documents
+    # that their concrete classes must be explicitly allowlisted.
+    dtype_classes = {
+        type(np.dtype(dtype))
+        for dtype in (
+            np.bool_,
+            np.int8,
+            np.int16,
+            np.int32,
+            np.int64,
+            np.uint8,
+            np.uint16,
+            np.uint32,
+            np.uint64,
+            np.float16,
+            np.float32,
+            np.float64,
+            np.complex64,
+            np.complex128,
+        )
+    }
+    safe_globals.extend(sorted(dtype_classes, key=lambda item: str(item)))
+    return safe_globals
+
+
+def _load_weights_only_checkpoint(path: Path):
+    allowed_names = {
+        "numpy.core.multiarray.scalar",
+        "numpy._core.multiarray.scalar",
+        "numpy.dtype",
+    }
+    inspect_globals = getattr(
+        torch.serialization,
+        "get_unsafe_globals_in_checkpoint",
+        None,
+    )
+    if inspect_globals is not None:
+        unsafe_names = set(inspect_globals(path))
+        unexpected = unsafe_names - allowed_names
+        if unexpected:
+            raise ValueError(
+                "ECGFounder checkpoint contains unsupported serialized globals: "
+                f"{sorted(unexpected)}"
+            )
+    with torch.serialization.safe_globals(_legacy_numpy_safe_globals()):
+        return torch.load(path, map_location="cpu", weights_only=True)
+
+
 def load_ecgfounder_checkpoint(
     backbone,
     checkpoint_path: str,
@@ -314,7 +373,7 @@ def load_ecgfounder_checkpoint(
                 f"ECGFounder checkpoint SHA-256 mismatch: expected "
                 f"{expected_sha256}, got {actual}"
             )
-    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    checkpoint = _load_weights_only_checkpoint(path)
     state = checkpoint.get("state_dict", checkpoint)
     state = {
         key.removeprefix("module."): value
