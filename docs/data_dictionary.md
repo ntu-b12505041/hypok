@@ -13,7 +13,8 @@
 
 此檔案未提供 `potassium_time`、`itemid`、`labevent_id` 或 `delta_minutes`，因此
 專案無法獨立驗證上游 ±60 分鐘最近檢驗規則。`build-cohort` 只驗證本地 ECG
-可讀性、時間、12 個標準導程、血鉀範圍和標籤一致性。
+可讀性、時間、12 個標準導程、所有 physical signal sample 為有限值、血鉀範圍
+和標籤一致性；含 NaN/Inf 的 ECG 會在病人切分前排除並寫入 audit CSV。
 
 ## 輸入
 

@@ -12,7 +12,11 @@ from hypok_ecg.calibration import tune_ordered_thresholds
 from hypok_ecg.config import load_config, validate_config
 from hypok_ecg.labels import PotassiumLabeler
 from hypok_ecg.metrics import classification_metrics, target_is_met
-from hypok_ecg.mimic import build_precomputed_cohort, normalize_precomputed_cohort
+from hypok_ecg.mimic import (
+    _signal_value_quality,
+    build_precomputed_cohort,
+    normalize_precomputed_cohort,
+)
 from hypok_ecg.preprocess import ECGPreprocessor
 from hypok_ecg.sampling import RotatingMajoritySampler
 from hypok_ecg.splits import make_patient_level_splits
@@ -171,7 +175,20 @@ class PrecomputedCohortTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "inconsistent"):
             normalize_precomputed_cohort(frame, self._config())
 
-    def test_build_uses_only_selected_paths_and_keeps_complete_leads(self):
+    def test_signal_quality_identifies_nonfinite_samples_and_leads(self):
+        signal = np.asarray(
+            [
+                [0.1, np.nan, 0.3],
+                [np.inf, 0.2, 0.4],
+            ]
+        )
+        quality = _signal_value_quality(signal, ["I", "II", "III"])
+        self.assertEqual(quality["signal_samples"], 6)
+        self.assertEqual(quality["nonfinite_samples"], 2)
+        self.assertAlmostEqual(quality["nonfinite_fraction"], 2 / 6)
+        self.assertEqual(quality["nonfinite_leads"], "I|II")
+
+    def test_build_excludes_nonfinite_waveform_before_split(self):
         with TemporaryDirectory() as temporary:
             temp = Path(temporary)
             source = temp / "provided.csv"
@@ -192,9 +209,11 @@ class PrecomputedCohortTests(unittest.TestCase):
             config["data"]["precomputed_cohort_csv"] = str(source)
             config["data"]["cohort_csv"] = str(output)
             config["data"]["ecg_root"] = str(ecg_root)
+            config["data"]["precomputed_validate_signal_values"] = True
             leads = config["data"]["lead_order"]
 
-            def fake_header(_root, row):
+            def fake_record(_root, row, validate_signal_values):
+                nonfinite = int(row["study_id"] == 402)
                 return {
                     "subject_id": row["subject_id"],
                     "study_id": row["study_id"],
@@ -205,13 +224,22 @@ class PrecomputedCohortTests(unittest.TestCase):
                     "n_sig": 12,
                     "lead_names": "|".join(leads),
                     "index_error": "",
+                    "signal_samples": 60000,
+                    "nonfinite_samples": nonfinite,
+                    "nonfinite_fraction": nonfinite / 60000,
+                    "nonfinite_leads": "II" if nonfinite else "",
                 }
 
-            with patch("hypok_ecg.mimic._read_header_row", side_effect=fake_header):
+            with patch("hypok_ecg.mimic._read_precomputed_row", side_effect=fake_record):
                 cohort, summary = build_precomputed_cohort(config, workers=2)
-            self.assertEqual(len(cohort), 3)
+            self.assertEqual(len(cohort), 2)
             self.assertEqual(summary["header_errors"], 0)
-            self.assertEqual(set(cohort["label_id"]), {0, 1, 2})
+            self.assertTrue(summary["signal_values_validated"])
+            self.assertEqual(summary["nonfinite_waveforms"], 1)
+            self.assertEqual(set(cohort["label_id"]), {0, 2})
+            excluded = pd.read_csv(output.with_name("cohort.excluded.csv"))
+            self.assertEqual(excluded["study_id"].tolist(), [402])
+            self.assertEqual(excluded["exclusion_reason"].tolist(), ["nonfinite_signal"])
             self.assertTrue(output.exists())
 
 

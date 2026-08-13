@@ -9,6 +9,8 @@ data:
   cohort_source: "precomputed"
   precomputed_cohort_csv: "data/raw/hyperkalemia_data.csv"
   precomputed_ecg_time_tolerance_seconds: 1
+  # Read every selected waveform once and reject any NaN/Inf before splitting.
+  precomputed_validate_signal_values: true
   precomputed_matching_assumption:
     serum_itemid: 50971
     lab_window_minutes: 60

@@ -203,6 +203,59 @@ def _complete_standard_leads(lead_names: object, required_leads: list[str]) -> b
     return len(observed) == len(required_leads) and set(observed) == set(required_leads)
 
 
+def _signal_value_quality(signal: np.ndarray, lead_names: list[str]) -> dict:
+    """Summarize non-finite physical samples before a record enters a split."""
+    array = np.asarray(signal)
+    if array.ndim != 2:
+        raise ValueError(f"Expected samples x leads, got {array.shape}")
+    if array.shape[1] != len(lead_names):
+        raise ValueError(
+            f"Signal has {array.shape[1]} columns but {len(lead_names)} lead names"
+        )
+    nonfinite = ~np.isfinite(array)
+    nonfinite_count = int(nonfinite.sum())
+    affected_leads = [
+        str(lead_names[index])
+        for index in np.flatnonzero(nonfinite.any(axis=0))
+    ]
+    return {
+        "signal_samples": int(array.size),
+        "nonfinite_samples": nonfinite_count,
+        "nonfinite_fraction": (
+            float(nonfinite_count / array.size) if array.size else 0.0
+        ),
+        "nonfinite_leads": "|".join(affected_leads),
+    }
+
+
+def _read_precomputed_row(
+    ecg_root: Path,
+    row: dict,
+    validate_signal_values: bool,
+) -> dict:
+    result = _read_header_row(ecg_root, row)
+    if not validate_signal_values:
+        result.update(
+            {
+                "signal_samples": -1,
+                "nonfinite_samples": -1,
+                "nonfinite_fraction": math.nan,
+                "nonfinite_leads": "",
+            }
+        )
+        return result
+    try:
+        import wfdb
+    except ImportError as exc:
+        raise RuntimeError("wfdb is required to validate MIMIC-IV-ECG signals") from exc
+
+    record = wfdb.rdrecord(str(ecg_root / result["record_path"]))
+    if record.p_signal is None:
+        raise ValueError("physical ECG signal is unavailable")
+    result.update(_signal_value_quality(record.p_signal, list(record.sig_name)))
+    return result
+
+
 def build_precomputed_cohort(
     config: dict,
     workers: int = 16,
@@ -226,10 +279,17 @@ def build_precomputed_cohort(
     rows = prepared[["_source_row", "subject_id", "study_id", "record_path"]].to_dict(
         "records"
     )
+    validate_signal_values = bool(
+        data_cfg.get("precomputed_validate_signal_values", True)
+    )
 
     def safe_read(row: dict) -> dict:
         try:
-            result = _read_header_row(ecg_root, row)
+            result = _read_precomputed_row(
+                ecg_root,
+                row,
+                validate_signal_values=validate_signal_values,
+            )
             result["_source_row"] = int(row["_source_row"])
             return result
         except Exception as exc:
@@ -244,6 +304,10 @@ def build_precomputed_cohort(
                 "n_sig": -1,
                 "lead_names": "",
                 "index_error": f"{type(exc).__name__}: {exc}",
+                "signal_samples": -1,
+                "nonfinite_samples": -1,
+                "nonfinite_fraction": math.nan,
+                "nonfinite_leads": "",
             }
 
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
@@ -276,6 +340,11 @@ def build_precomputed_cohort(
     complete_leads = cohort["n_sig"].eq(len(required_leads)) & cohort[
         "complete_standard_leads"
     ]
+    finite_signal = (
+        cohort["nonfinite_samples"].eq(0)
+        if validate_signal_values
+        else pd.Series(True, index=cohort.index)
+    )
 
     cohort["exclusion_reason"] = ""
     cohort.loc[~readable, "exclusion_reason"] = "unreadable_or_missing_waveform"
@@ -284,6 +353,15 @@ def build_precomputed_cohort(
         cohort.loc[readable & time_match & ~complete_leads, "exclusion_reason"] = (
             "incomplete_standard_leads"
         )
+    lead_eligible = (
+        complete_leads
+        if data_cfg.get("require_12_leads", True)
+        else pd.Series(True, index=cohort.index)
+    )
+    cohort.loc[
+        readable & time_match & lead_eligible & ~finite_signal,
+        "exclusion_reason",
+    ] = "nonfinite_signal"
     keep = cohort["exclusion_reason"].eq("")
 
     audit_columns = [
@@ -295,6 +373,10 @@ def build_precomputed_cohort(
         "ecg_time_delta_seconds",
         "n_sig",
         "lead_names",
+        "signal_samples",
+        "nonfinite_samples",
+        "nonfinite_fraction",
+        "nonfinite_leads",
         "index_error",
         "exclusion_reason",
     ]
@@ -333,9 +415,13 @@ def build_precomputed_cohort(
         "mimic_ecg_version": data_cfg["mimic_ecg_version"],
         "mimic_clinical_version": data_cfg.get("mimic_clinical_version", "stated 3.1"),
         "source_records": int(len(prepared)),
+        "signal_values_validated": validate_signal_values,
         "header_errors": int((~readable).sum()),
         "ecg_time_mismatches": int((readable & ~time_match).sum()),
         "incomplete_standard_leads": int((readable & time_match & ~complete_leads).sum()),
+        "nonfinite_waveforms": int(
+            (readable & time_match & lead_eligible & ~finite_signal).sum()
+        ),
         "records": int(len(cohort)),
         "subjects": int(cohort["subject_id"].nunique()),
         "class_counts": {str(k): int(v) for k, v in counts.items()},

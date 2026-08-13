@@ -67,8 +67,8 @@ hypok-ecg validate-config --config configs/ecgfounder_finetune.yaml
 2. 準備 [MIMIC-IV-ECG v1.0](https://physionet.org/content/mimic-iv-ecg/1.0/)
    對應的 WFDB `.hea` 與 `.dat` 檔；CSV 的 `path` 是相對於 ECG root 的 record path。
 3. 修改 `configs/mimic.yaml` 與 `configs/ecgfounder_finetune.yaml` 的 `ecg_root`。
-4. `build-cohort` 只讀 CSV 中列出的 ECG header，檢查波形檔存在、ECG 時間一致，
-   並只保留完整的 I、II、III、aVR、aVL、aVF、V1–V6。
+4. `build-cohort` 只讀 CSV 中列出的 ECG，檢查波形檔存在、ECG 時間一致、
+   I、II、III、aVR、aVL、aVF、V1–V6 完整，並排除含任何 NaN/Inf 的訊號。
 5. 上游 ECG–K⁺ 配對視為未獨立驗證的研究假設；正式報告會明確揭露。
 6. 不要把原始 MIMIC、配對 cohort、逐筆 prediction 或 checkpoint 公開上傳。
 

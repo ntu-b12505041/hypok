@@ -312,11 +312,13 @@ def create_validation_report(
         dataset_details = f"""- Cohort source: externally precomputed ECG–potassium pairs
 - Upstream matching independently verified in this project: **No**
 - Assumed upstream matching rule: `{cohort_summary.get('matching_assumption', config['data'].get('precomputed_matching_assumption', {}))}`
-- Local eligibility checks: WFDB files readable, ECG time agrees with header, and all 12 standard leads are present
+- Local eligibility checks: WFDB files readable, ECG time agrees with header, all 12 standard leads are present, and every physical signal sample is finite
 - Source records before local eligibility checks: {cohort_summary.get('source_records', 'Not available')}
+- Waveform sample values validated: {cohort_summary.get('signal_values_validated', 'Not available')}
 - Excluded unreadable/missing waveforms: {cohort_summary.get('header_errors', 'Not available')}
 - Excluded ECG-time mismatches: {cohort_summary.get('ecg_time_mismatches', 'Not available')}
-- Excluded incomplete/nonstandard leads: {cohort_summary.get('incomplete_standard_leads', 'Not available')}"""
+- Excluded incomplete/nonstandard leads: {cohort_summary.get('incomplete_standard_leads', 'Not available')}
+- Excluded waveforms containing NaN/Inf: {cohort_summary.get('nonfinite_waveforms', 'Not available')}"""
     else:
         dataset_details = f"""- ECG–laboratory matching window: ±{config['data']['lab_window_minutes']} minutes
 - Potassium item IDs: `{cohort_summary.get('potassium_itemids', config['data']['potassium_itemids'])}`"""

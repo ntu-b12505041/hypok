@@ -40,7 +40,9 @@ tail -n 10 outputs/mimic_se_resnet_multitask/logs/sampling_audit.csv
 先檢查 cohort summary：
 
 - 三類都有足夠病人；
-- `header_errors`、`ecg_time_mismatches` 與 `incomplete_standard_leads` 數量合理；
+- `signal_values_validated` 為 `true`；
+- `header_errors`、`ecg_time_mismatches`、`incomplete_standard_leads` 與
+  `nonfinite_waveforms` 數量合理；
 - `matching_independently_verified` 必須如實記錄為 `false`；
 - train/validation/test 沒有 patient overlap；
 - test HyperK 病人數足以估計窄 CI。
