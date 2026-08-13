@@ -77,6 +77,9 @@ lead dropout。預設不做 amplitude scaling。
 - Heads：3-class logits、2 個 cumulative ordinal logits、continuous K⁺ regression。
 - Loss：class-weighted cross entropy + 0.3 ordinal BCE + 0.2 Smooth-L1。
 - Class weights：effective number of samples，只由 train 計算。
+- Train-only sampling：每個 epoch 保留全部 HypoK/HyperK，並從固定亂序的 NK
+  pool 輪替抽取少數類總數的 1.5 倍；約 5 個 epoch 可遍歷全部 NK。每輪實際
+  類別與獨立病人數寫入 `logs/sampling_audit.csv`。Validation/Test 不抽樣。
 - AdamW，LR 1e-3，weight decay 1e-4，3-epoch warmup + cosine decay。
 - Batch 64，最多 60 epochs，validation macro AUROC 選 checkpoint，patience 10。
 - Mixed precision 只在 CUDA 啟用。

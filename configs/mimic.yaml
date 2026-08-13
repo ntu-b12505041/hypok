@@ -71,6 +71,16 @@ augmentation:
   # Amplitude scaling is disabled because T-wave amplitude is label-relevant.
   amplitude_scale_range: [1.0, 1.0]
 
+sampling:
+  # Train only: keep every HypoK/HyperK ECG and rotate through different NK ECGs.
+  # Validation and test always retain the untouched natural prevalence.
+  enabled: true
+  strategy: "rotating_nk_subsampling"
+  majority_class_id: 1
+  majority_to_minority_total_ratio: 1.5
+  rotate_each_epoch: true
+  seed: 20260723
+
 model:
   name: "se_resnet1d_multitask"
   input_leads: 12

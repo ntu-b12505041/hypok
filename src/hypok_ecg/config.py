@@ -49,6 +49,23 @@ def validate_config(config: dict[str, Any]) -> None:
             "data.precomputed_cohort_csv is required when cohort_source=precomputed"
         )
 
+    sampling = config.get("sampling", {})
+    if bool(sampling.get("enabled", False)):
+        strategy = str(sampling.get("strategy", "")).lower()
+        if strategy != "rotating_nk_subsampling":
+            raise ValueError(
+                "sampling.strategy must be 'rotating_nk_subsampling' when enabled"
+            )
+        majority_class_id = int(sampling.get("majority_class_id", 1))
+        num_classes = int(config["model"]["num_classes"])
+        if majority_class_id < 0 or majority_class_id >= num_classes:
+            raise ValueError("sampling.majority_class_id is outside model classes")
+        ratio = float(sampling.get("majority_to_minority_total_ratio", 1.5))
+        if ratio <= 0:
+            raise ValueError(
+                "sampling.majority_to_minority_total_ratio must be positive"
+            )
+
     model_name = config["model"]["name"]
     if model_name not in {"se_resnet1d_multitask", "ecgfounder_multitask"}:
         raise ValueError(f"Unsupported model.name: {model_name}")

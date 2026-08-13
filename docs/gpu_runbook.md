@@ -30,6 +30,13 @@ hypok-ecg train --config configs/mimic.yaml
 hypok-ecg evaluate --config configs/mimic.yaml
 ```
 
+只有 train split 使用 rotating NK subsampling；validation/test 維持完整原始
+分布。訓練期間可查看每輪實際抽樣數：
+
+```bash
+tail -n 10 outputs/mimic_se_resnet_multitask/logs/sampling_audit.csv
+```
+
 先檢查 cohort summary：
 
 - 三類都有足夠病人；

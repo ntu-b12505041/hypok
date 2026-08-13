@@ -9,11 +9,12 @@ import numpy as np
 import pandas as pd
 
 from hypok_ecg.calibration import tune_ordered_thresholds
-from hypok_ecg.config import load_config
+from hypok_ecg.config import load_config, validate_config
 from hypok_ecg.labels import PotassiumLabeler
 from hypok_ecg.metrics import classification_metrics, target_is_met
 from hypok_ecg.mimic import build_precomputed_cohort, normalize_precomputed_cohort
 from hypok_ecg.preprocess import ECGPreprocessor
+from hypok_ecg.sampling import RotatingMajoritySampler
 from hypok_ecg.splits import make_patient_level_splits
 
 
@@ -79,6 +80,61 @@ class ConfigurationTests(unittest.TestCase):
         founder = load_config(root / "configs" / "ecgfounder_finetune.yaml")
         self.assertEqual(baseline["data"]["split_csv"], founder["data"]["split_csv"])
         self.assertEqual(founder["preprocess"]["target_sampling_rate"], 500)
+        self.assertTrue(baseline["sampling"]["enabled"])
+        self.assertEqual(
+            baseline["sampling"]["strategy"], "rotating_nk_subsampling"
+        )
+
+    def test_invalid_sampling_ratio_is_rejected(self):
+        root = Path(__file__).resolve().parents[1]
+        config = load_config(root / "configs" / "mimic.yaml")
+        config["sampling"]["majority_to_minority_total_ratio"] = 0
+        with self.assertRaisesRegex(ValueError, "must be positive"):
+            validate_config(config)
+
+
+class SamplingTests(unittest.TestCase):
+    def _sampler(self):
+        labels = np.asarray([0] * 4 + [1] * 20 + [2] * 3)
+        subject_ids = np.arange(len(labels)) // 2
+        return RotatingMajoritySampler(
+            labels,
+            subject_ids,
+            majority_class_id=1,
+            majority_to_minority_total_ratio=1.0,
+            seed=17,
+        )
+
+    def test_all_minority_examples_are_kept_and_majority_is_capped(self):
+        sampler = self._sampler()
+        selected = np.asarray(list(iter(sampler)))
+        labels = sampler.labels[selected]
+        self.assertEqual(len(selected), 14)
+        self.assertEqual(int((labels == 0).sum()), 4)
+        self.assertEqual(int((labels == 1).sum()), 7)
+        self.assertEqual(int((labels == 2).sum()), 3)
+        self.assertEqual(sampler.last_audit["NK_records"], 7)
+        self.assertEqual(sampler.last_audit["records"], 14)
+
+    def test_majority_rotation_covers_pool_without_changing_minorities(self):
+        sampler = self._sampler()
+        majority_seen = set()
+        minority = set(np.flatnonzero(sampler.labels != 1))
+        majority_selections = []
+        for _ in range(3):
+            selected = set(iter(sampler))
+            self.assertTrue(minority.issubset(selected))
+            majority = {index for index in selected if sampler.labels[index] == 1}
+            majority_selections.append(majority)
+            majority_seen.update(majority)
+        self.assertNotEqual(majority_selections[0], majority_selections[1])
+        self.assertEqual(majority_seen, set(np.flatnonzero(sampler.labels == 1)))
+
+    def test_sampler_is_reproducible(self):
+        first = self._sampler()
+        second = self._sampler()
+        for _ in range(4):
+            self.assertEqual(list(iter(first)), list(iter(second)))
 
 
 class PrecomputedCohortTests(unittest.TestCase):

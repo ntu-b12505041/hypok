@@ -71,6 +71,15 @@ augmentation:
   lead_dropout_probability: 0.03
   amplitude_scale_range: [1.0, 1.0]
 
+sampling:
+  # Identical train-only sampler to the from-scratch baseline.
+  enabled: true
+  strategy: "rotating_nk_subsampling"
+  majority_class_id: 1
+  majority_to_minority_total_ratio: 1.5
+  rotate_each_epoch: true
+  seed: 20260723
+
 model:
   name: "ecgfounder_multitask"
   checkpoint_path: "checkpoints/ecgfounder/12_lead_ECGFounder.pth"

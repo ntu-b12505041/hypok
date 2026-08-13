@@ -57,6 +57,9 @@ augmentation:
   lead_dropout_probability: 0.0
   amplitude_scale_range: [1.0, 1.0]
 
+sampling:
+  enabled: false
+
 model:
   name: "se_resnet1d_multitask"
   input_leads: 12

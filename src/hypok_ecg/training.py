@@ -14,6 +14,7 @@ from .dataset import load_split_datasets
 from .losses import build_multitask_loss, effective_number_weights
 from .metrics import classification_metrics
 from .model import build_model
+from .sampling import build_training_sampler
 from .utils import seed_everything, write_json
 
 
@@ -49,9 +50,15 @@ def _make_loaders(config: dict, datasets: dict):
         "persistent_workers": int(section["num_workers"]) > 0,
     }
     generator = torch.Generator().manual_seed(int(config["project"]["seed"]))
+    train_sampler = build_training_sampler(config, datasets["train"])
     return {
         "train": DataLoader(
-            datasets["train"], shuffle=True, generator=generator, drop_last=False, **common
+            datasets["train"],
+            shuffle=train_sampler is None,
+            sampler=train_sampler,
+            generator=generator,
+            drop_last=False,
+            **common,
         ),
         "validation": DataLoader(
             datasets["validation"], shuffle=False, drop_last=False, **common
@@ -244,6 +251,7 @@ def train_model(config: dict) -> dict:
     epochs_without_improvement = 0
     patience = int(config["training"]["early_stopping_patience"])
     history = []
+    sampling_audit = []
     checkpoint_path = output_dir / "checkpoints" / "best.pt"
     started = time.perf_counter()
     for epoch in range(1, int(config["training"]["epochs"]) + 1):
@@ -265,6 +273,12 @@ def train_model(config: dict) -> dict:
         row.update({f"train_{key}": value for key, value in train_stats.items() if np.isscalar(value)})
         row.update({f"val_{key}": value for key, value in val_stats.items() if np.isscalar(value)})
         history.append(row)
+        sampler_audit = getattr(loaders["train"].sampler, "last_audit", None)
+        if sampler_audit is not None:
+            sampling_audit.append(dict(sampler_audit))
+            pd.DataFrame(sampling_audit).to_csv(
+                output_dir / "logs" / "sampling_audit.csv", index=False
+            )
         score = float(val_stats.get("macro_auroc_ovr", np.nan))
         if not np.isfinite(score):
             score = float(val_stats["balanced_accuracy"])
@@ -343,6 +357,12 @@ def train_model(config: dict) -> dict:
         ),
         "freeze_backbone_epochs": freeze_backbone_epochs,
         "model_name": config["model"]["name"],
+        "sampling": config.get("sampling", {"enabled": False}),
+        "sampling_audit": (
+            str(output_dir / "logs" / "sampling_audit.csv")
+            if sampling_audit
+            else None
+        ),
     }
     write_json(output_dir / "logs" / "training_summary.json", summary)
     return summary

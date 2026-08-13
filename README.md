@@ -42,6 +42,10 @@ fine-tune。ECGFounder 必須使用官方相容的 500 Hz、10 秒、global z-sc
 前處理，因此兩個模型的 raw ECG 與 split 完全相同，但 model-specific
 preprocessing 不同。
 
+訓練集使用相同的 **rotating NK subsampling**：每個 epoch 保留全部 HypoK 與
+HyperK，並抽取約為兩個少數類總數 1.5 倍的 NK。NK 子集合會逐 epoch 輪替，
+不永久刪除任何 ECG。Validation 與 Test 完整保留原始盛行率，不做抽樣。
+
 ## 安裝
 
 建議 Python 3.10–3.12。GPU 機器先依
@@ -129,6 +133,7 @@ hypok-ecg build-cohort --config configs/mimic.yaml --workers 8 --limit 100
 - `figures/per_class_metrics.png`
 - `figures/roc_pr_curves.png`
 - `logs/training_summary.json`（含訓練秒數、環境與參數量）
+- `logs/sampling_audit.csv`（每個 epoch 實際 ECG／病人與各類抽樣數）
 
 ## ECGFounder fine-tuning 對照組
 

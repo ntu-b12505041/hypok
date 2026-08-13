@@ -252,6 +252,17 @@ def create_validation_report(
         else f"Clip only implausible extremes at "
         f"±{preprocess_cfg['clip_millivolts']} mV."
     )
+    sampling_cfg = config.get("sampling", {})
+    if bool(sampling_cfg.get("enabled", False)):
+        sampling_description = (
+            "Train-only rotating NK subsampling: retain every HypoK and HyperK "
+            "record and select NK records at "
+            f"{sampling_cfg.get('majority_to_minority_total_ratio', 1.5)}× the "
+            "combined minority count per epoch. Validation and test retain the "
+            "original prevalence."
+        )
+    else:
+        sampling_description = "No train-time subsampling."
 
     per_class_rows = []
     for name, values in metrics["per_class"].items():
@@ -361,6 +372,8 @@ HypoK, otherwise NK only.
 {model_description}
 - Heads: three-class softmax, monotonic ordinal, continuous K⁺ regression
 - Loss weights: `{config['training']['loss_weights']}`
+- Sampling: {sampling_description}
+- Sampling audit: `{training_summary.get('sampling_audit', 'Not available')}`
 - Optimizer: {config['training']['optimizer']}
 - Initial learning rate: {config['training']['learning_rate']}
 - Weight decay: {config['training']['weight_decay']}
