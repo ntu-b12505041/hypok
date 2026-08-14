@@ -13,6 +13,7 @@ from hypok_ecg.config import load_config, validate_config
 from hypok_ecg.ecgfounder import _legacy_numpy_safe_globals
 from hypok_ecg.labels import PotassiumLabeler
 from hypok_ecg.metrics import classification_metrics, target_is_met
+from hypok_ecg.model import KMorphNetV2, SEResNet1DDualBinary
 from hypok_ecg.mimic import (
     _signal_value_quality,
     build_precomputed_cohort,
@@ -21,6 +22,11 @@ from hypok_ecg.mimic import (
 from hypok_ecg.preprocess import ECGPreprocessor
 from hypok_ecg.sampling import RotatingMajoritySampler
 from hypok_ecg.splits import make_patient_level_splits
+
+try:
+    import torch
+except ImportError:  # pragma: no cover
+    torch = None
 
 
 class LabelTests(unittest.TestCase):
@@ -90,6 +96,19 @@ class ConfigurationTests(unittest.TestCase):
             baseline["sampling"]["strategy"], "rotating_nk_subsampling"
         )
 
+    def test_v2_experiment_configs_are_valid(self):
+        root = Path(__file__).resolve().parents[1]
+        v2a = load_config(
+            root / "configs" / "experiments" / "mimic_v2a_dual_binary.yaml"
+        )
+        v2b = load_config(
+            root / "configs" / "experiments" / "mimic_v2b_kmorphnet.yaml"
+        )
+        self.assertEqual(v2a["model"]["name"], "se_resnet1d_dual_binary")
+        self.assertEqual(v2b["model"]["stem_kernel_sizes"], [7, 15, 31])
+        self.assertEqual(v2b["training"]["gradient_accumulation_steps"], 4)
+        self.assertEqual(v2a["data"]["split_csv"], v2b["data"]["split_csv"])
+
     def test_invalid_sampling_ratio_is_rejected(self):
         root = Path(__file__).resolve().parents[1]
         config = load_config(root / "configs" / "mimic.yaml")
@@ -110,6 +129,58 @@ class ECGFounderCheckpointTests(unittest.TestCase):
         self.assertIn("numpy.core.multiarray.scalar", names)
         self.assertIn("numpy.dtype", names)
         self.assertNotIn("builtins.eval", names)
+
+
+@unittest.skipIf(torch is None, "PyTorch is not installed")
+class V2ModelTests(unittest.TestCase):
+    def test_dual_binary_baseline_output_contract(self):
+        model = SEResNet1DDualBinary(
+            input_leads=12,
+            base_channels=8,
+            stage_blocks=(1, 1),
+            kernel_size=7,
+            dropout=0.0,
+            se_reduction=4,
+        )
+        outputs = model(torch.randn(2, 12, 256))
+        self.assertEqual(tuple(outputs["logits"].shape), (2, 3))
+        self.assertEqual(tuple(outputs["binary_logits"].shape), (2, 2))
+        expected_nk = -0.5 * outputs["binary_logits"].sum(dim=1)
+        self.assertTrue(torch.allclose(outputs["logits"][:, 1], expected_nk))
+
+    def test_k_morphnet_attention_and_output_contract(self):
+        model = KMorphNetV2(
+            input_leads=12,
+            base_channels=8,
+            stage_blocks=(1, 1),
+            kernel_size=7,
+            stem_kernel_sizes=(7, 15, 31),
+            stem_branch_channels=4,
+            embedding_dim=32,
+            transformer_layers=1,
+            attention_heads=4,
+            transformer_ff_dim=64,
+            temporal_attention_hidden=8,
+            dropout=0.0,
+            se_reduction=4,
+        )
+        outputs = model(torch.randn(2, 12, 256))
+        self.assertEqual(tuple(outputs["logits"].shape), (2, 3))
+        self.assertEqual(tuple(outputs["per_lead_binary_logits"].shape), (2, 12, 2))
+        self.assertTrue(
+            torch.allclose(
+                outputs["hypok_lead_attention"].sum(dim=1),
+                torch.ones(2),
+                atol=1e-5,
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                outputs["hyperk_lead_attention"].sum(dim=1),
+                torch.ones(2),
+                atol=1e-5,
+            )
+        )
 
 
 class SamplingTests(unittest.TestCase):

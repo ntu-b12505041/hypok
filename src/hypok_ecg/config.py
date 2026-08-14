@@ -67,8 +67,29 @@ def validate_config(config: dict[str, Any]) -> None:
             )
 
     model_name = config["model"]["name"]
-    if model_name not in {"se_resnet1d_multitask", "ecgfounder_multitask"}:
+    supported_models = {
+        "se_resnet1d_multitask",
+        "se_resnet1d_dual_binary",
+        "k_morphnet_v2",
+        "ecgfounder_multitask",
+    }
+    if model_name not in supported_models:
         raise ValueError(f"Unsupported model.name: {model_name}")
+    if model_name != "ecgfounder_multitask":
+        expected_leads = len(config["data"]["lead_order"])
+        if int(config["model"].get("input_leads", expected_leads)) != expected_leads:
+            raise ValueError("model.input_leads must match data.lead_order")
+    if model_name == "k_morphnet_v2":
+        kernels = [int(value) for value in config["model"]["stem_kernel_sizes"]]
+        if not kernels or any(value <= 0 or value % 2 == 0 for value in kernels):
+            raise ValueError("model.stem_kernel_sizes must contain positive odd values")
+        if int(config["model"]["embedding_dim"]) % int(
+            config["model"]["attention_heads"]
+        ):
+            raise ValueError("model.embedding_dim must be divisible by attention_heads")
+    accumulation = int(config["training"].get("gradient_accumulation_steps", 1))
+    if accumulation < 1:
+        raise ValueError("training.gradient_accumulation_steps must be >= 1")
     if model_name == "ecgfounder_multitask":
         preprocess = config["preprocess"]
         if int(preprocess["target_sampling_rate"]) != 500:

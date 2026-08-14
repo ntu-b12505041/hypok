@@ -46,6 +46,11 @@ def evaluate_model(config: dict) -> dict:
         ordinal,
         predictions["predicted_potassium"].to_numpy(),
         calibration,
+        binary_logits=(
+            predictions[["hypok_binary_logit", "hyperk_binary_logit"]].to_numpy()
+            if "hypok_binary_logit" in predictions
+            else None
+        ),
     )
     predictions["prediction"] = y_pred
     for idx in range(3):
@@ -91,4 +96,3 @@ def evaluate_model(config: dict) -> dict:
         output_dir,
     )
     return {"metrics": metrics, "confidence_intervals": intervals, "report": str(report_path)}
-
