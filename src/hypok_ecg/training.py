@@ -126,6 +126,7 @@ def _run_epoch(
     scheduler=None,
     scaler=None,
     gradient_clip_norm: float = 1.0,
+    gradient_accumulation_steps: int = 1,
 ) -> dict:
     torch, _ = _torch()
     training = optimizer is not None
@@ -133,13 +134,14 @@ def _run_epoch(
     total_loss = 0.0
     total_examples = 0
     labels, predictions, probabilities = [], [], []
-    components = {"classification_loss": 0.0, "ordinal_loss": 0.0, "regression_loss": 0.0}
+    components = {}
     use_amp = scaler is not None and scaler.is_enabled()
+    accumulation_steps = max(1, int(gradient_accumulation_steps))
+    if training:
+        optimizer.zero_grad(set_to_none=True)
 
-    for batch in loader:
+    for batch_index, batch in enumerate(loader):
         ecg = batch["ecg"].to(device=device, dtype=torch.float32, non_blocking=True)
-        if training:
-            optimizer.zero_grad(set_to_none=True)
         context = (
             torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
             if use_amp
@@ -149,24 +151,37 @@ def _run_epoch(
             outputs = model(ecg)
             loss, loss_components = loss_fn(outputs, batch)
         if training:
+            backward_loss = loss / accumulation_steps
+            should_step = (
+                (batch_index + 1) % accumulation_steps == 0
+                or batch_index + 1 == len(loader)
+            )
             if use_amp:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_norm)
-                scaler.step(optimizer)
-                scaler.update()
+                scaler.scale(backward_loss).backward()
+                if should_step:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), gradient_clip_norm
+                    )
+                    scaler.step(optimizer)
+                    scaler.update()
             else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_norm)
-                optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
+                backward_loss.backward()
+                if should_step:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), gradient_clip_norm
+                    )
+                    optimizer.step()
+            if should_step:
+                if scheduler is not None:
+                    scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
 
         batch_size = ecg.shape[0]
         total_examples += batch_size
         total_loss += float(loss.detach().cpu()) * batch_size
         for key, value in loss_components.items():
-            components[key] += float(value.cpu()) * batch_size
+            components[key] = components.get(key, 0.0) + float(value.cpu()) * batch_size
         probs = torch.softmax(outputs["logits"].detach(), dim=1).cpu().numpy()
         labels.append(batch["label"].cpu().numpy())
         probabilities.append(probs)
@@ -193,20 +208,34 @@ def collect_predictions(model, loader, device) -> pd.DataFrame:
             outputs = model(batch["ecg"].to(device=device, dtype=torch.float32))
             logits = outputs["logits"].cpu().numpy()
             ordinal = outputs["ordinal_logits"].cpu().numpy()
+            binary = (
+                outputs["binary_logits"].cpu().numpy()
+                if "binary_logits" in outputs
+                else None
+            )
             potassium_pred = outputs["potassium"].cpu().numpy()
             batch_size = len(logits)
             for idx in range(batch_size):
-                rows.append(
-                    {
-                        "subject_id": int(batch["subject_id"][idx]),
-                        "study_id": int(batch["study_id"][idx]),
-                        "label_id": int(batch["label"][idx]),
-                        "potassium": float(batch["potassium"][idx]),
-                        "predicted_potassium": float(potassium_pred[idx]),
-                        **{f"logit_{j}": float(logits[idx, j]) for j in range(3)},
-                        **{f"ordinal_logit_{j}": float(ordinal[idx, j]) for j in range(2)},
-                    }
-                )
+                row = {
+                    "subject_id": int(batch["subject_id"][idx]),
+                    "study_id": int(batch["study_id"][idx]),
+                    "label_id": int(batch["label"][idx]),
+                    "potassium": float(batch["potassium"][idx]),
+                    "predicted_potassium": float(potassium_pred[idx]),
+                    **{f"logit_{j}": float(logits[idx, j]) for j in range(3)},
+                    **{
+                        f"ordinal_logit_{j}": float(ordinal[idx, j])
+                        for j in range(2)
+                    },
+                }
+                if binary is not None:
+                    row.update(
+                        {
+                            "hypok_binary_logit": float(binary[idx, 0]),
+                            "hyperk_binary_logit": float(binary[idx, 1]),
+                        }
+                    )
+                rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -242,7 +271,17 @@ def train_model(config: dict) -> dict:
     device = choose_device(config["training"]["device"])
     model.to(device)
     loss_fn = build_multitask_loss(config, class_weights)
-    optimizer, scheduler = _optimizer_and_scheduler(config, model, len(loaders["train"]))
+    accumulation_steps = int(
+        config["training"].get("gradient_accumulation_steps", 1)
+    )
+    if accumulation_steps < 1:
+        raise ValueError("training.gradient_accumulation_steps must be >= 1")
+    optimizer_steps_per_epoch = math.ceil(
+        len(loaders["train"]) / accumulation_steps
+    )
+    optimizer, scheduler = _optimizer_and_scheduler(
+        config, model, optimizer_steps_per_epoch
+    )
     use_amp = bool(config["training"]["mixed_precision"]) and device.type == "cuda"
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
@@ -266,6 +305,7 @@ def train_model(config: dict) -> dict:
             scheduler=scheduler,
             scaler=scaler,
             gradient_clip_norm=float(config["training"]["gradient_clip_norm"]),
+            gradient_accumulation_steps=accumulation_steps,
         )
         with torch.inference_mode():
             val_stats = _run_epoch(model, loaders["validation"], loss_fn, device)
@@ -317,6 +357,13 @@ def train_model(config: dict) -> dict:
         ordinal_logits,
         validation_predictions["predicted_potassium"].to_numpy(),
         config,
+        binary_logits=(
+            validation_predictions[
+                ["hypok_binary_logit", "hyperk_binary_logit"]
+            ].to_numpy()
+            if "hypok_binary_logit" in validation_predictions
+            else None
+        ),
     )
     write_json(output_dir / "metrics" / "calibration.json", calibration.to_dict())
     validation_predictions.to_csv(
@@ -357,6 +404,9 @@ def train_model(config: dict) -> dict:
         ),
         "freeze_backbone_epochs": freeze_backbone_epochs,
         "model_name": config["model"]["name"],
+        "gradient_accumulation_steps": accumulation_steps,
+        "effective_batch_size": int(config["training"]["batch_size"])
+        * accumulation_steps,
         "sampling": config.get("sampling", {"enabled": False}),
         "sampling_audit": (
             str(output_dir / "logs" / "sampling_audit.csv")

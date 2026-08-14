@@ -108,6 +108,7 @@ def calibrate_predictions(
     ordinal_logits: np.ndarray,
     potassium_prediction: np.ndarray,
     config: dict,
+    binary_logits: np.ndarray | None = None,
 ) -> CalibrationResult:
     section = config["calibration"]
     temperature = (
@@ -119,6 +120,15 @@ def calibrate_predictions(
         "ordinal": expit(np.asarray(ordinal_logits)).sum(axis=1),
         "regression": np.asarray(potassium_prediction, dtype=float),
     }
+    if binary_logits is not None:
+        binary_probabilities = expit(np.asarray(binary_logits, dtype=float))
+        if binary_probabilities.ndim != 2 or binary_probabilities.shape[1] != 2:
+            raise ValueError("binary_logits must have shape [records, 2]")
+        # Ordered evidence: negative means stronger HypoK evidence; positive means
+        # stronger HyperK evidence. Two validation thresholds leave the centre as NK.
+        candidates["dual_binary"] = (
+            binary_probabilities[:, 1] - binary_probabilities[:, 0]
+        )
     results = {}
     best_name = None
     best_rank = None
@@ -151,6 +161,7 @@ def apply_calibration(
     ordinal_logits: np.ndarray,
     potassium_prediction: np.ndarray,
     calibration: dict,
+    binary_logits: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     probabilities = apply_temperature(logits, float(calibration["temperature"]))
     head = calibration["selected_head"]
@@ -160,6 +171,11 @@ def apply_calibration(
         score = expit(np.asarray(ordinal_logits)).sum(axis=1)
     elif head == "regression":
         score = np.asarray(potassium_prediction, dtype=float)
+    elif head == "dual_binary":
+        if binary_logits is None:
+            raise ValueError("dual_binary calibration requires binary_logits")
+        binary_probabilities = expit(np.asarray(binary_logits, dtype=float))
+        score = binary_probabilities[:, 1] - binary_probabilities[:, 0]
     else:
         raise ValueError(f"Unknown calibrated head: {head}")
     prediction = _predict_from_thresholds(
@@ -168,4 +184,3 @@ def apply_calibration(
         float(calibration["high_threshold"]),
     )
     return prediction, probabilities
-

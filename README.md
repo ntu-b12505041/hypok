@@ -194,6 +194,7 @@ python scripts/make_synthetic_demo.py --output-dir outputs/synthetic_demo
 - [資料欄位與配對規則](docs/data_dictionary.md)
 - [GPU 正式執行手冊](docs/gpu_runbook.md)
 - [ECGFounder fine-tuning 說明](docs/ecgfounder_finetuning.md)
+- [K-MorphNet V2 與雙二元分類實驗](docs/k_morphnet_v2.md)
 - [給 VS Code Copilot 的執行 Prompt](docs/copilot_prompt.md)
 
 本專案僅供研究，不是醫療器材，不能取代抽血檢驗或臨床判斷。
