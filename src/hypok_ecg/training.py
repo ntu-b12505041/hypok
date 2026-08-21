@@ -3,12 +3,15 @@ from __future__ import annotations
 import math
 import platform
 import time
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from .calibration import calibrate_predictions
+from .calibration import (
+    calibrate_predictions,
+    dual_binary_probabilities,
+    tune_dual_binary_thresholds,
+)
 from .config import ensure_output_dirs
 from .dataset import load_split_datasets
 from .losses import build_multitask_loss, effective_number_weights
@@ -43,11 +46,11 @@ def choose_device(requested: str):
 def _make_loaders(config: dict, datasets: dict):
     torch, DataLoader = _torch()
     section = config["training"]
+    workers = int(section["num_workers"])
     common = {
         "batch_size": int(section["batch_size"]),
-        "num_workers": int(section["num_workers"]),
+        "num_workers": workers,
         "pin_memory": torch.cuda.is_available(),
-        "persistent_workers": int(section["num_workers"]) > 0,
     }
     generator = torch.Generator().manual_seed(int(config["project"]["seed"]))
     train_sampler = build_training_sampler(config, datasets["train"])
@@ -58,12 +61,23 @@ def _make_loaders(config: dict, datasets: dict):
             sampler=train_sampler,
             generator=generator,
             drop_last=False,
+            persistent_workers=False,
             **common,
         ),
         "validation": DataLoader(
-            datasets["validation"], shuffle=False, drop_last=False, **common
+            datasets["validation"],
+            shuffle=False,
+            drop_last=False,
+            persistent_workers=workers > 0,
+            **common,
         ),
-        "test": DataLoader(datasets["test"], shuffle=False, drop_last=False, **common),
+        "test": DataLoader(
+            datasets["test"],
+            shuffle=False,
+            drop_last=False,
+            persistent_workers=workers > 0,
+            **common,
+        ),
     }
 
 
@@ -127,13 +141,16 @@ def _run_epoch(
     scaler=None,
     gradient_clip_norm: float = 1.0,
     gradient_accumulation_steps: int = 1,
+    collect_calibration_inputs: bool = False,
 ) -> dict:
     torch, _ = _torch()
     training = optimizer is not None
     model.train(training)
     total_loss = 0.0
     total_examples = 0
-    labels, predictions, probabilities = [], [], []
+    labels = []
+    softmax_probabilities = []
+    binary_logits_batches = []
     components = {}
     use_amp = scaler is not None and scaler.is_enabled()
     accumulation_steps = max(1, int(gradient_accumulation_steps))
@@ -182,20 +199,34 @@ def _run_epoch(
         total_loss += float(loss.detach().cpu()) * batch_size
         for key, value in loss_components.items():
             components[key] = components.get(key, 0.0) + float(value.cpu()) * batch_size
-        probs = torch.softmax(outputs["logits"].detach(), dim=1).cpu().numpy()
+        softmax_probabilities.append(
+            torch.softmax(outputs["logits"].detach(), dim=1).cpu().numpy()
+        )
+        if "binary_logits" in outputs:
+            binary_logits_batches.append(outputs["binary_logits"].detach().cpu().numpy())
         labels.append(batch["label"].cpu().numpy())
-        probabilities.append(probs)
-        predictions.append(probs.argmax(axis=1))
 
     y_true = np.concatenate(labels)
-    y_pred = np.concatenate(predictions)
-    probs = np.concatenate(probabilities)
-    metrics = classification_metrics(y_true, y_pred, probs)
+    binary_logits = (
+        np.concatenate(binary_logits_batches) if binary_logits_batches else None
+    )
+    probabilities = (
+        dual_binary_probabilities(binary_logits)
+        if binary_logits is not None
+        else np.concatenate(softmax_probabilities)
+    )
+    y_pred = probabilities.argmax(axis=1)
+    metrics = classification_metrics(y_true, y_pred, probabilities)
     result = {
         "loss": total_loss / max(1, total_examples),
         **{key: value / max(1, total_examples) for key, value in components.items()},
         **{key: value for key, value in metrics.items() if key != "per_class"},
     }
+    if collect_calibration_inputs:
+        result["_calibration_inputs"] = {
+            "y_true": y_true,
+            "binary_logits": binary_logits,
+        }
     return result
 
 
@@ -286,6 +317,7 @@ def train_model(config: dict) -> dict:
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     best_score = -np.inf
+    best_rank = None
     best_epoch = -1
     epochs_without_improvement = 0
     patience = int(config["training"]["early_stopping_patience"])
@@ -294,6 +326,8 @@ def train_model(config: dict) -> dict:
     checkpoint_path = output_dir / "checkpoints" / "best.pt"
     started = time.perf_counter()
     for epoch in range(1, int(config["training"]["epochs"]) + 1):
+        if hasattr(datasets["train"], "set_epoch"):
+            datasets["train"].set_epoch(epoch - 1)
         if freeze_backbone_epochs > 0 and epoch == freeze_backbone_epochs + 1:
             model.unfreeze_backbone()
         train_stats = _run_epoch(
@@ -308,10 +342,56 @@ def train_model(config: dict) -> dict:
             gradient_accumulation_steps=accumulation_steps,
         )
         with torch.inference_mode():
-            val_stats = _run_epoch(model, loaders["validation"], loss_fn, device)
+            val_stats = _run_epoch(
+                model,
+                loaders["validation"],
+                loss_fn,
+                device,
+                collect_calibration_inputs=True,
+            )
         row = {"epoch": epoch, "learning_rate": optimizer.param_groups[0]["lr"]}
-        row.update({f"train_{key}": value for key, value in train_stats.items() if np.isscalar(value)})
-        row.update({f"val_{key}": value for key, value in val_stats.items() if np.isscalar(value)})
+        row.update(
+            {f"train_{key}": value for key, value in train_stats.items() if np.isscalar(value)}
+        )
+        row.update(
+            {f"val_{key}": value for key, value in val_stats.items() if np.isscalar(value)}
+        )
+
+        calibration_inputs = val_stats.get("_calibration_inputs", {})
+        binary_logits = calibration_inputs.get("binary_logits")
+        checkpoint_tuning = None
+        if binary_logits is not None:
+            checkpoint_tuning = tune_dual_binary_thresholds(
+                calibration_inputs["y_true"],
+                binary_logits,
+                grid_size=int(config["training"].get("checkpoint_threshold_grid_size", 41)),
+                target_recall=float(config["calibration"]["target_recall"]),
+                target_specificity=float(config["calibration"]["target_specificity"]),
+            )
+            rank = tuple(checkpoint_tuning["rank"]) + (
+                float(val_stats.get("macro_auroc_ovr", -np.inf)),
+            )
+            score = float(checkpoint_tuning["minimum_recall_specificity"])
+            row.update(
+                {
+                    "val_minimum_six": score,
+                    "val_target_met": int(checkpoint_tuning["target_met"]),
+                    "val_hypo_threshold": checkpoint_tuning["hypo_threshold"],
+                    "val_hyper_threshold": checkpoint_tuning["hyper_threshold"],
+                    "val_conflict_rate": checkpoint_tuning["conflict_rate"],
+                }
+            )
+        else:
+            score = float(val_stats.get("macro_auroc_ovr", np.nan))
+            if not np.isfinite(score):
+                score = float(val_stats["balanced_accuracy"])
+            rank = (
+                0,
+                score,
+                float(val_stats["balanced_accuracy"]),
+                float(val_stats["macro_f1"]),
+            )
+
         history.append(row)
         sampler_audit = getattr(loaders["train"].sampler, "last_audit", None)
         if sampler_audit is not None:
@@ -319,10 +399,8 @@ def train_model(config: dict) -> dict:
             pd.DataFrame(sampling_audit).to_csv(
                 output_dir / "logs" / "sampling_audit.csv", index=False
             )
-        score = float(val_stats.get("macro_auroc_ovr", np.nan))
-        if not np.isfinite(score):
-            score = float(val_stats["balanced_accuracy"])
-        if score > best_score:
+        if best_rank is None or rank > best_rank:
+            best_rank = rank
             best_score = score
             best_epoch = epoch
             epochs_without_improvement = 0
@@ -331,6 +409,8 @@ def train_model(config: dict) -> dict:
                     "model_state_dict": model.state_dict(),
                     "epoch": epoch,
                     "validation_score": score,
+                    "validation_rank": list(rank),
+                    "checkpoint_calibration": checkpoint_tuning,
                     "config": config,
                     "class_weights": class_weights.tolist(),
                 },
@@ -386,6 +466,11 @@ def train_model(config: dict) -> dict:
     summary = {
         "best_epoch": best_epoch,
         "best_validation_score": best_score,
+        "best_validation_rank": list(best_rank) if best_rank is not None else None,
+        "checkpoint_selection_metric": (
+            "validation_minimum_six" if checkpoint.get("checkpoint_calibration") else "macro_auroc"
+        ),
+        "best_checkpoint_calibration": checkpoint.get("checkpoint_calibration"),
         "elapsed_seconds": elapsed,
         "elapsed_hours": elapsed / 3600.0,
         "epochs_completed": len(history),
