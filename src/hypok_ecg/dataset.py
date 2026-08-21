@@ -9,6 +9,12 @@ from .labels import PotassiumLabeler
 from .preprocess import ECGAugmenter, ECGPreprocessor
 
 
+def augmentation_rng(seed: int, epoch: int, index: int) -> np.random.Generator:
+    """Create a deterministic RNG that changes across epochs for one record."""
+    sequence = np.random.SeedSequence([int(seed), int(epoch), int(index)])
+    return np.random.default_rng(sequence)
+
+
 class MIMICECGPotassiumDataset:
     """PyTorch-compatible lazy WFDB dataset."""
 
@@ -26,8 +32,6 @@ class MIMICECGPotassiumDataset:
             from torch.utils.data import Dataset
         except ImportError as exc:
             raise RuntimeError("PyTorch is required for model training") from exc
-        # Registering through inheritance is unnecessary for DataLoader; the
-        # object only needs __len__ and __getitem__. Keep imports lazy.
         _ = Dataset
         self.frame = frame.reset_index(drop=True).copy()
         self.ecg_root = Path(ecg_root).expanduser().resolve()
@@ -36,6 +40,12 @@ class MIMICECGPotassiumDataset:
         self.labeler = labeler
         self.augmenter = augmenter
         self.seed = int(seed)
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        if int(epoch) < 0:
+            raise ValueError("epoch must be non-negative")
+        self.epoch = int(epoch)
 
     def __len__(self) -> int:
         return len(self.frame)
@@ -61,8 +71,7 @@ class MIMICECGPotassiumDataset:
         signal = signal[:, indices]
         signal = self.preprocessor(signal, fs)
         if self.augmenter is not None:
-            rng = np.random.default_rng(self.seed + index)
-            signal = self.augmenter(signal, rng)
+            signal = self.augmenter(signal, augmentation_rng(self.seed, self.epoch, index))
         label_id = int(row["label_id"])
         ordinal = self.labeler.ordinal_targets([label_id])[0]
         return {
@@ -100,4 +109,3 @@ def load_split_datasets(config: dict) -> dict[str, MIMICECGPotassiumDataset]:
             frame[frame["split"] == "test"], augmenter=None, **common
         ),
     }
-
