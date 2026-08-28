@@ -16,8 +16,6 @@ else
   git -C "${BENCHMARK_DIR}" pull --ff-only
 fi
 
-# Keep Colab's torch installation intact. These packages match the released
-# ECG-FM benchmark environment closely enough for the CPC backbone modules.
 python -m pip install -q \
   "requests==2.32.4" \
   "lightning==2.5.2" \
@@ -93,9 +91,6 @@ print(f"Extracted ECG-CPC checkpoint archive to {out}")
 PY
 fi
 
-# The released composed YAML contains the entire architecture, but its
-# trainer.pretrained path can point at the authors' filesystem. Patch only
-# that field; all architecture settings remain the official release values.
 python - <<PY
 from pathlib import Path
 from omegaconf import OmegaConf
@@ -143,19 +138,35 @@ from pathlib import Path
 import torch
 from v3_ecgcpc_bare import load_bare_ecgcpc
 
+if not torch.cuda.is_available():
+    raise RuntimeError("ECG-CPC setup smoke requires a Colab GPU runtime")
+device = torch.device("cuda")
+
 config = Path("${CHECKPOINT_DIR}") / "ecgcpc_colab_patched.yaml"
 model, cfg, report = load_bare_ecgcpc(config)
 print("ECG-CPC backbone:", type(model.ts_encoder).__name__)
 print("Official input  :", float(cfg.base.input_size), "sec @", float(cfg.base.fs), "Hz")
-print("Parameter coverage:", f"{report.parameter_coverage:.4%}")
+print("Parameter coverage:", f"{report.parameter_coverage:.6%}")
 print("Loaded parameter tensors:", f"{report.loaded_parameter_tensors}/{report.total_parameter_tensors}")
+print("Loaded buffer tensors:", report.loaded_buffer_tensors)
+print("Exactly verified backbone tensors:", report.verified_backbone_tensors)
+print("Restored S4 cache lengths:", report.s4_cache_lengths)
 
-# Architecture-only tensor check. The next script uses a real MIMIC ECG.
-x = torch.zeros(2, int(cfg.base.input_channels), int(round(float(cfg.base.input_size)*float(cfg.base.fs))))
+model.to(device)
+x = torch.zeros(
+    2,
+    int(cfg.base.input_channels),
+    int(round(float(cfg.base.input_size) * float(cfg.base.fs))),
+    device=device,
+)
 with torch.inference_mode():
     out = model(seq=x)
-print("Output seq shape:", tuple(out["seq"].shape))
-if out["seq"].ndim != 3 or out["seq"].shape[-1] != 512:
-    raise RuntimeError(f"Unexpected CPC output shape: {tuple(out['seq'].shape)}")
+seq = out["seq"]
+print("Output seq shape:", tuple(seq.shape))
+print("Output finite:", bool(torch.isfinite(seq).all().item()))
+if seq.ndim != 3 or seq.shape[-1] != 512:
+    raise RuntimeError(f"Unexpected CPC output shape: {tuple(seq.shape)}")
+if not torch.isfinite(seq).all():
+    raise RuntimeError("ECG-CPC setup smoke produced non-finite values")
 print("SETUP PASS")
 PY
