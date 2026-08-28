@@ -44,22 +44,37 @@ def main() -> None:
         raise RuntimeError("Select a Colab GPU runtime")
 
     model, cfg, report = load_bare_ecgcpc(args.cpc_config)
+    if report.parameter_coverage < 0.999999:
+        raise RuntimeError(f"Pretrained parameter coverage is not 100%: {report.parameter_coverage:.6%}")
+    expected_layers = int(cfg.ts.pred.layers)
+    if len(report.s4_cache_lengths) != expected_layers:
+        raise RuntimeError(
+            f"Expected {expected_layers} restored S4 cache layers, got {report.s4_cache_lengths}"
+        )
+
     model.to(device)
     with torch.inference_mode():
         output = model(seq=torch.from_numpy(crops).to(device=device, dtype=torch.float32))
     if "seq" not in output:
         raise RuntimeError(f"ECG-CPC output keys: {output.keys()}")
     seq = output["seq"]
-    if seq.ndim != 3 or 512 not in seq.shape:
+    if seq.ndim != 3 or seq.shape[-1] != 512:
         raise RuntimeError(f"Unexpected ECG-CPC sequence feature shape: {tuple(seq.shape)}")
+    if not torch.isfinite(seq).all():
+        raise RuntimeError("ECG-CPC produced non-finite sequence features")
 
     print("study_id:", int(row["study_id"]))
     print("input crops:", crops.shape)
     print("CPC sequence features:", tuple(seq.shape))
     print("official fs:", float(cfg.base.fs))
     print("official input seconds:", float(cfg.base.input_size))
-    print("parameter coverage:", f"{report.parameter_coverage:.4%}")
+    print("parameter coverage:", f"{report.parameter_coverage:.6%}")
     print("loaded parameter tensors:", f"{report.loaded_parameter_tensors}/{report.total_parameter_tensors}")
+    print("resized S4 cache buffers:", len(report.resized_s4_cache_buffers))
+    print("S4 cache lengths:")
+    for name, length in sorted(report.s4_cache_lengths.items()):
+        print("  ", name, "L=", length)
+    print("feature finite:", bool(torch.isfinite(seq).all().item()))
     print("GPU:", torch.cuda.get_device_name(0))
     print("V3 ECG-CPC REAL-ECG SMOKE PASS")
 
