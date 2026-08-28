@@ -51,6 +51,8 @@ def main() -> None:
         raise RuntimeError(
             f"Expected {expected_layers} restored S4 cache layers, got {report.s4_cache_lengths}"
         )
+    if report.verified_backbone_tensors <= 0:
+        raise RuntimeError("No checkpoint tensors were numerically verified")
 
     model.to(device)
     with torch.inference_mode():
@@ -70,6 +72,8 @@ def main() -> None:
     print("official input seconds:", float(cfg.base.input_size))
     print("parameter coverage:", f"{report.parameter_coverage:.6%}")
     print("loaded parameter tensors:", f"{report.loaded_parameter_tensors}/{report.total_parameter_tensors}")
+    print("loaded buffer tensors:", report.loaded_buffer_tensors)
+    print("exactly verified backbone tensors:", report.verified_backbone_tensors)
     print("resized S4 cache buffers:", len(report.resized_s4_cache_buffers))
     print("S4 cache lengths:")
     for name, length in sorted(report.s4_cache_lengths.items()):
