@@ -18,6 +18,8 @@ fi
 # Match the lightweight runtime pieces used by the official ICLR 2026
 # ECG-FM benchmarking environment, while deliberately leaving Colab's torch
 # installation untouched. Pin requests back to Colab's required version.
+# resampy is imported transitively by the official dataset transform module
+# even when we only load a pretrained CPC model for inference.
 python -m pip install -q \
   "requests==2.32.4" \
   "lightning==2.5.2" \
@@ -27,6 +29,7 @@ python -m pip install -q \
   "hydra-core==1.3.2" \
   "omegaconf==2.3.0" \
   "einops==0.8.1" \
+  "resampy==0.4.3" \
   wfdb scipy scikit-learn matplotlib pyyaml
 
 mkdir -p "${CHECKPOINT_DIR}"
@@ -134,9 +137,11 @@ import requests
 import lightning
 import lightning.pytorch
 import pykeops
+import resampy
 print("requests:", requests.__version__)
 print("lightning:", lightning.__version__)
 print("pykeops:", pykeops.__version__)
+print("resampy:", resampy.__version__)
 print("DEPENDENCIES PASS")
 PY
 
