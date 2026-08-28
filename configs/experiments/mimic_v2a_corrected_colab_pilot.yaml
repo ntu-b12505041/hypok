@@ -1,0 +1,130 @@
+project:
+  name: "MIMIC-IV ECG Dyskalemia V2-A Corrected Colab Pilot"
+  seed: 20260723
+  output_dir: "/content/drive/MyDrive/hypok_colab/outputs/mimic_v2a_corrected_pilot"
+
+data:
+  cohort_source: "precomputed"
+  precomputed_cohort_csv: "/content/colab_pilot/pilot_split.csv"
+  precomputed_ecg_time_tolerance_seconds: 1
+  precomputed_validate_signal_values: false
+  precomputed_matching_assumption:
+    serum_itemid: 50971
+    lab_window_minutes: 60
+    select_nearest: true
+    tie_prefer_before_ecg: true
+  ecg_root: "/content/colab_pilot/ecg"
+  clinical_root: "/content/unused"
+  ecg_index_csv: "/content/unused/ecg_index.csv"
+  cohort_csv: "/content/colab_pilot/pilot_split.csv"
+  split_csv: "/content/colab_pilot/pilot_split.csv"
+  waveform_cache_dir: null
+  mimic_ecg_version: "1.0"
+  mimic_clinical_version: "3.1"
+  lab_window_minutes: 60
+  include_whole_blood: false
+  potassium_itemids:
+    serum: [50971]
+    whole_blood: [50822, 52452]
+  min_potassium: 1.5
+  max_potassium: 10.0
+  prefer_lab_before_ecg: true
+  require_12_leads: true
+  lead_order: ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"]
+
+labels:
+  hypokalemia_upper: 3.5
+  hyperkalemia_lower: 5.5
+  hypokalemia_inclusive: false
+  hyperkalemia_inclusive: true
+  names: ["HypoK", "NK", "HyperK"]
+
+split:
+  train_ratio: 0.70
+  validation_ratio: 0.15
+  test_ratio: 0.15
+  group_column: "subject_id"
+  label_column: "label_id"
+
+preprocess:
+  target_sampling_rate: 250
+  duration_seconds: 10
+  bandpass_low_hz: 0.5
+  bandpass_high_hz: 40.0
+  notch_hz: 60.0
+  notch_quality_factor: 30.0
+  clip_millivolts: 5.0
+  remove_baseline: true
+  apply_notch: false
+  normalization: "none"
+  profile: "standard"
+
+augmentation:
+  enabled: true
+  gaussian_noise_std_millivolts: 0.01
+  max_time_shift_seconds: 0.08
+  lead_dropout_probability: 0.05
+  amplitude_scale_range: [1.0, 1.0]
+
+sampling:
+  enabled: true
+  strategy: "rotating_nk_subsampling"
+  majority_class_id: 1
+  majority_to_minority_total_ratio: 2.5
+  rotate_each_epoch: true
+  seed: 20260723
+
+model:
+  name: "se_resnet1d_dual_binary"
+  input_leads: 12
+  base_channels: 64
+  stage_blocks: [2, 2, 2, 2]
+  kernel_size: 7
+  dropout: 0.20
+  se_reduction: 16
+  num_classes: 3
+  potassium_center: 4.3
+  potassium_scale: 1.0
+  pretrained_checkpoint: null
+  freeze_backbone_epochs: 0
+
+training:
+  device: "auto"
+  epochs: 60
+  batch_size: 64
+  gradient_accumulation_steps: 1
+  num_workers: 4
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  optimizer: "adamw"
+  scheduler: "cosine"
+  warmup_epochs: 3
+  mixed_precision: true
+  gradient_clip_norm: 1.0
+  early_stopping_patience: 10
+  monitor: "val_minimum_six"
+  checkpoint_threshold_grid_size: 31
+  class_weight_method: "effective_number"
+  effective_number_beta: 0.9998
+  label_smoothing: 0.02
+  binary_pos_weight: [2.0, 2.0]
+  loss_weights:
+    classification: 0.0
+    dual_binary: 1.0
+    ordinal: 0.20
+    regression: 0.10
+
+calibration:
+  temperature_scaling: false
+  primary_head: "dual_binary_independent"
+  threshold_grid_size: 81
+  target_recall: 0.85
+  target_specificity: 0.85
+  selection_metric: "minimum_recall_specificity"
+
+evaluation:
+  bootstrap_iterations: 500
+  bootstrap_confidence_level: 0.95
+  bootstrap_unit: "subject_id"
+  save_predictions: true
+  decision_curve: false
