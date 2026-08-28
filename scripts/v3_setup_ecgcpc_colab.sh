@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BENCHMARK_DIR="${1:-/content/ecg-fm-benchmarking}"
 CHECKPOINT_DIR="${2:-/content/ecgcpc_checkpoint}"
 ZIP_PATH="${3:-/content/ecgcpc_checkpoint.zip}"
@@ -15,11 +16,8 @@ else
   git -C "${BENCHMARK_DIR}" pull --ff-only
 fi
 
-# Match the lightweight runtime pieces used by the official ICLR 2026
-# ECG-FM benchmarking environment, while deliberately leaving Colab's torch
-# installation untouched. Pin requests back to Colab's required version.
-# resampy is imported transitively by the official dataset transform module
-# even when we only load a pretrained CPC model for inference.
+# Keep Colab's torch installation intact. These packages match the released
+# ECG-FM benchmark environment closely enough for the CPC backbone modules.
 python -m pip install -q \
   "requests==2.32.4" \
   "lightning==2.5.2" \
@@ -63,7 +61,6 @@ print("Figshare file:", entry.get("name"))
 print("Expected bytes:", expected)
 print("Download URL:", url)
 
-last_error = None
 for attempt in range(1, 4):
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -83,13 +80,11 @@ for attempt in range(1, 4):
             raise RuntimeError(f"Downloaded file is not a ZIP archive: {archive}")
         print("ZIP validation PASS")
         break
-    except Exception as e:
-        last_error = e
+    except Exception:
         if archive.exists():
             archive.unlink()
         if attempt == 3:
             raise
-        print("Download failed, retrying:", repr(e))
         time.sleep(2 * attempt)
 
 with zipfile.ZipFile(archive) as zf:
@@ -98,9 +93,9 @@ print(f"Extracted ECG-CPC checkpoint archive to {out}")
 PY
 fi
 
-# The released YAML can retain the authors' absolute checkpoint location.
-# Patch only trainer.pretrained to the local largest model checkpoint while
-# preserving the rest of the official configuration.
+# The released composed YAML contains the entire architecture, but its
+# trainer.pretrained path can point at the authors' filesystem. Patch only
+# that field; all architecture settings remain the official release values.
 python - <<PY
 from pathlib import Path
 from omegaconf import OmegaConf
@@ -119,8 +114,6 @@ if not weights:
 checkpoint = max(weights, key=lambda p: p.stat().st_size)
 
 cfg = OmegaConf.load(config)
-if not hasattr(cfg, "trainer"):
-    raise RuntimeError(f"Unexpected ECG-CPC config: trainer section missing in {config}")
 cfg.trainer.pretrained = str(checkpoint.resolve())
 patched = root / "ecgcpc_colab_patched.yaml"
 OmegaConf.save(cfg, patched)
@@ -135,7 +128,6 @@ printf '\n===== DEPENDENCY CHECK =====\n'
 python - <<'PY'
 import requests
 import lightning
-import lightning.pytorch
 import pykeops
 import resampy
 print("requests:", requests.__version__)
@@ -145,14 +137,25 @@ print("resampy:", resampy.__version__)
 print("DEPENDENCIES PASS")
 PY
 
-printf '\n===== IMPORT SMOKE TEST =====\n'
-PYTHONPATH="${BENCHMARK_DIR}/code:${PYTHONPATH:-}" python - <<PY
+printf '\n===== BARE BACKBONE SMOKE TEST =====\n'
+PYTHONPATH="${REPO_DIR}/scripts:${BENCHMARK_DIR}/code:${PYTHONPATH:-}" python - <<PY
 from pathlib import Path
-from clinical_ts.models.ecg_foundation_models.ecg_cpc.basic_io import load_model_from_config
+import torch
+from v3_ecgcpc_bare import load_bare_ecgcpc
 
 config = Path("${CHECKPOINT_DIR}") / "ecgcpc_colab_patched.yaml"
-model, cfg = load_model_from_config(str(config))
-print("ECG-CPC class:", type(model).__name__)
-print("Patched config:", config)
+model, cfg, report = load_bare_ecgcpc(config)
+print("ECG-CPC backbone:", type(model.ts_encoder).__name__)
+print("Official input  :", float(cfg.base.input_size), "sec @", float(cfg.base.fs), "Hz")
+print("Parameter coverage:", f"{report.parameter_coverage:.4%}")
+print("Loaded parameter tensors:", f"{report.loaded_parameter_tensors}/{report.total_parameter_tensors}")
+
+# Architecture-only tensor check. The next script uses a real MIMIC ECG.
+x = torch.zeros(2, int(cfg.base.input_channels), int(round(float(cfg.base.input_size)*float(cfg.base.fs))))
+with torch.inference_mode():
+    out = model(seq=x)
+print("Output seq shape:", tuple(out["seq"].shape))
+if out["seq"].ndim != 3 or out["seq"].shape[-1] != 512:
+    raise RuntimeError(f"Unexpected CPC output shape: {tuple(out['seq'].shape)}")
 print("SETUP PASS")
 PY
