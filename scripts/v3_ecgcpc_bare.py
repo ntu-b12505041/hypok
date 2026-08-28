@@ -55,6 +55,19 @@ def _load_checkpoint_state(path: Path) -> dict[str, torch.Tensor]:
     return state
 
 
+def _cfg_int(node: Any, key: str, default: int = 0) -> int:
+    """Read an optional integer from an OmegaConf node.
+
+    The released checkpoint YAML is not guaranteed to contain every field that
+    appears after Hydra structured-default composition. Static ECG features are
+    not used by ECG-CPC, so absent static/frequency dimensions must safely be 0.
+    """
+    value = node.get(key, default) if hasattr(node, "get") else getattr(node, key, default)
+    if value is None:
+        value = default
+    return int(value)
+
+
 def load_bare_ecgcpc(config_path: str | Path) -> tuple[BareECGCPC, Any, LoadReport]:
     config_path = Path(config_path)
     if not config_path.exists():
@@ -70,13 +83,28 @@ def load_bare_ecgcpc(config_path: str | Path) -> tuple[BareECGCPC, Any, LoadRepo
     # so no PTB-XL df_memmap.pkl is required.
     from clinical_ts.template_modules import ShapeConfig, TimeSeriesEncoder
 
+    fs = float(cfg.base.fs)
+    input_seconds = float(cfg.base.input_size)
+    input_channels = _cfg_int(cfg.base, "input_channels", 12)
+    input_length = int(round(input_seconds * fs))
+
+    if input_channels != 12:
+        raise RuntimeError(f"Unexpected ECG-CPC input_channels={input_channels}; expected 12")
+    if input_length != 600:
+        raise RuntimeError(
+            f"Unexpected ECG-CPC input length {input_length} samples "
+            f"({input_seconds}s @ {fs}Hz); expected 600"
+        )
+
     input_shape = ShapeConfig(
-        channels=int(cfg.base.input_channels),
-        length=int(round(float(cfg.base.input_size) * float(cfg.base.fs))),
+        channels=input_channels,
+        length=input_length,
         sequence_last=True,
-        static_dim=int(cfg.base.input_channels_cont),
-        channels2=int(cfg.base.freq_bins),
-        static_dim_cat=int(cfg.base.input_channels_cat),
+        # These are structured-config defaults in the benchmark framework and
+        # may be absent from the released raw YAML. ECG-CPC uses waveform only.
+        static_dim=_cfg_int(cfg.base, "input_channels_cont", 0),
+        channels2=_cfg_int(cfg.base, "freq_bins", 0),
+        static_dim_cat=_cfg_int(cfg.base, "input_channels_cat", 0),
     )
     ts_encoder = TimeSeriesEncoder(
         cfg.ts,
