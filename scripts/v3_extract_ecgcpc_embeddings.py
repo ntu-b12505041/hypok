@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 from scipy.signal import resample_poly
 
+from v3_ecgcpc_bare import load_bare_ecgcpc
+
 LEADS = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6"]
 
 
@@ -58,9 +60,8 @@ def _prepare_signal(record_path: Path, target_fs: int, source_seconds: float, no
     else:
         x = x[:, :wanted_source]
 
-    # Keep preprocessing deliberately minimal for the foundation-model probe:
-    # resample to the official ECG-CPC downstream frequency and clip only
-    # implausible physical amplitudes. Do not destroy T-wave amplitude by default.
+    # Foundation-model probe: match the released downstream sample rate and
+    # preserve physical ECG amplitudes by default. No label-dependent transform.
     if source_fs != target_fs:
         gcd = np.gcd(source_fs, target_fs)
         x = resample_poly(x, target_fs // gcd, source_fs // gcd, axis=1).astype(np.float32)
@@ -102,7 +103,6 @@ def main() -> None:
         raise FileNotFoundError(f"ECG benchmark code not found: {benchmark / 'code'}")
 
     sys.path.insert(0, str((benchmark / "code").resolve()))
-    from clinical_ts.models.ecg_foundation_models.ecg_cpc.basic_io import load_model_from_config
 
     frame = pd.read_csv(split_path).reset_index(drop=True)
     required = {"subject_id", "study_id", "record_path", "label_id", "potassium", "split"}
@@ -140,11 +140,11 @@ def main() -> None:
     if device.type != "cuda":
         raise RuntimeError("V3 embedding extraction expects a Colab GPU runtime")
 
-    print("Loading official ECG-CPC checkpoint config:", config_path)
-    model, _ = load_model_from_config(str(config_path))
-    model.eval().to(device)
-    for parameter in model.parameters():
-        parameter.requires_grad_(False)
+    print("Loading bare official ECG-CPC backbone:", config_path)
+    model, cfg, report = load_bare_ecgcpc(config_path)
+    model.to(device)
+    print("Parameter coverage:", f"{report.parameter_coverage:.4%}")
+    print("Official input:", float(cfg.base.input_size), "sec @", float(cfg.base.fs), "Hz")
 
     loader = DataLoader(
         PilotDataset(),
@@ -182,8 +182,6 @@ def main() -> None:
                 raise RuntimeError(f"Could not locate the documented 512-d feature axis: {tuple(seq.shape)}")
 
             pooled = pooled.reshape(batch, n_crops, 512)
-            # Mean captures global morphology; max retains crop-local evidence. This
-            # uses all four official-length crops from the 10-second ECG.
             representation = torch.cat(
                 [pooled.mean(dim=1), pooled.max(dim=1).values], dim=1
             ).cpu().numpy().astype(np.float32)
@@ -211,8 +209,11 @@ def main() -> None:
         "crop_seconds": args.crop_seconds,
         "crops_per_ecg": int(crops_per_ecg),
         "target_fs": int(args.target_fs),
+        "official_model_fs": float(cfg.base.fs),
+        "official_model_input_seconds": float(cfg.base.input_size),
         "normalization": args.normalization,
         "aggregation": "crop_mean_concat_crop_max",
+        "parameter_coverage": report.parameter_coverage,
         "device": str(device),
         "gpu": torch.cuda.get_device_name(0),
         "elapsed_seconds": time.perf_counter() - started,
