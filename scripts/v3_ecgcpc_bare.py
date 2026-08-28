@@ -21,6 +21,8 @@ class LoadReport:
     unexpected_keys: list[str]
     resized_s4_cache_buffers: list[str]
     s4_cache_lengths: dict[str, int]
+    loaded_buffer_tensors: int
+    verified_backbone_tensors: int
 
 
 class BareECGCPC(torch.nn.Module):
@@ -35,14 +37,7 @@ class BareECGCPC(torch.nn.Module):
 
 
 def _compose_official_config(config_path: Path):
-    """Compose the release YAML with the benchmark's own Hydra defaults.
-
-    The release YAML is sparse. The official loader first registers structured
-    defaults and calls Hydra compose(), which fills fields such as ts.pass_static,
-    ts.pre/post, ts.mask, ts.loss, and optional base fields. We reproduce that
-    exact config step but stop before ECGModel construction, so no PTB-XL data
-    are touched.
-    """
+    """Compose the release YAML with the benchmark's own Hydra defaults."""
     from hydra import compose, initialize_config_dir
     from hydra.core.global_hydra import GlobalHydra
     from clinical_ts.config import create_default_config
@@ -104,24 +99,44 @@ def _load_checkpoint_state(path: Path) -> dict[str, torch.Tensor]:
 
 
 def _is_s4_fft_cache(name: str) -> bool:
-    """Return True only for the known length-dependent S4 FFT cache buffers."""
     return name.endswith(".kernel.kernel.omega") or name.endswith(".kernel.kernel.z")
+
+
+def _replace_registered_buffer(
+    model: torch.nn.Module,
+    name: str,
+    source: torch.Tensor,
+) -> None:
+    """Replace buffer storage instead of copy_ into a possibly overlapping view.
+
+    ECG-CPC's S4 implementation creates B/P/w through repeat/expand. On modern
+    PyTorch those registered buffers may have overlapping storage, so the normal
+    load_state_dict copy_ path raises even when shapes are identical. Replacing
+    the registered buffer tensor is numerically equivalent for frozen inference
+    and matches the checkpoint values exactly.
+    """
+    module_name, leaf = name.rsplit(".", 1)
+    modules = dict(model.named_modules())
+    module = modules.get(module_name)
+    if module is None:
+        raise RuntimeError(f"Could not find buffer owner module for {name}")
+    if leaf not in module._buffers:
+        raise RuntimeError(f"{name} is not a registered buffer on recreated model")
+    target = module._buffers[leaf]
+    if target is None:
+        module._buffers[leaf] = source.detach().clone()
+    else:
+        module._buffers[leaf] = source.detach().to(
+            device=target.device, dtype=target.dtype
+        ).clone()
 
 
 def _restore_s4_fft_caches(
     model: torch.nn.Module,
     cache_tensors: dict[str, torch.Tensor],
 ) -> tuple[list[str], dict[str, int]]:
-    """Restore checkpoint S4 FFT cache buffers and their internal cache length.
-
-    In S4, omega/z are registered buffers, not trainable weights. Their first
-    dimension is L//2+1 and therefore legitimately changes when downstream
-    sequence length differs from pretraining. The benchmark's own custom
-    checkpoint loader replaces buffer.data directly, so shape equality is not
-    required. We do the same, but only for these two explicitly verified cache
-    buffers and also keep the kernel's Python `L` attribute consistent.
-    """
-    named_buffers = dict(model.named_buffers())
+    """Restore length-dependent omega/z buffers and synchronize kernel.L."""
+    before = dict(model.named_buffers())
     named_modules = dict(model.named_modules())
     resized: list[str] = []
     cache_lengths: dict[str, int] = {}
@@ -130,7 +145,7 @@ def _restore_s4_fft_caches(
     for name, source in cache_tensors.items():
         if not _is_s4_fft_cache(name):
             raise RuntimeError(f"Refusing to resize an unrecognized buffer: {name}")
-        if name not in named_buffers:
+        if name not in before:
             raise RuntimeError(f"Checkpoint S4 cache buffer absent from recreated model: {name}")
         if source.ndim != 2 or source.shape[-1] != 2 or source.shape[0] < 2:
             raise RuntimeError(f"Unexpected S4 cache tensor shape for {name}: {tuple(source.shape)}")
@@ -138,13 +153,9 @@ def _restore_s4_fft_caches(
         inferred_L = 2 * (int(source.shape[0]) - 1)
         module_name = name.rsplit(".", 1)[0]
         module_lengths.setdefault(module_name, set()).add(inferred_L)
-
-        target = named_buffers[name]
-        if tuple(target.shape) != tuple(source.shape):
+        if tuple(before[name].shape) != tuple(source.shape):
             resized.append(name)
-        # This intentionally mirrors the official benchmark's custom buffer
-        # loading semantics, which permits a buffer to change shape.
-        target.data = source.detach().to(device=target.device, dtype=target.dtype).clone()
+        _replace_registered_buffer(model, name, source)
 
     for module_name, lengths in module_lengths.items():
         if len(lengths) != 1:
@@ -153,14 +164,39 @@ def _restore_s4_fft_caches(
             )
         inferred_L = next(iter(lengths))
         module = named_modules.get(module_name)
-        if module is None:
-            raise RuntimeError(f"Could not find S4 kernel module {module_name}")
-        if not hasattr(module, "L"):
-            raise RuntimeError(f"S4 cache owner has no L attribute: {module_name}")
+        if module is None or not hasattr(module, "L"):
+            raise RuntimeError(f"Could not synchronize S4 cache owner: {module_name}")
         module.L = inferred_L
         cache_lengths[module_name] = inferred_L
 
     return sorted(resized), cache_lengths
+
+
+def _verify_exact_checkpoint_values(
+    model: torch.nn.Module,
+    tensors: dict[str, torch.Tensor],
+) -> int:
+    """Fail if any loaded backbone tensor differs from the released checkpoint."""
+    state = model.state_dict()
+    verified = 0
+    for name, source in tensors.items():
+        if name not in state:
+            raise RuntimeError(f"Loaded tensor disappeared from model state: {name}")
+        target = state[name].detach().cpu()
+        expected = source.detach().to(dtype=target.dtype, device="cpu")
+        if tuple(target.shape) != tuple(expected.shape):
+            raise RuntimeError(
+                f"Post-load shape mismatch for {name}: model={tuple(target.shape)} checkpoint={tuple(expected.shape)}"
+            )
+        if not torch.equal(target, expected):
+            if target.is_floating_point():
+                diff = float((target - expected).abs().max().item())
+                detail = f"max_abs_diff={diff}"
+            else:
+                detail = "non-floating tensor differs"
+            raise RuntimeError(f"Post-load checkpoint verification failed for {name}: {detail}")
+        verified += 1
+    return verified
 
 
 def load_bare_ecgcpc(config_path: str | Path) -> tuple[BareECGCPC, Any, LoadReport]:
@@ -208,11 +244,14 @@ def load_bare_ecgcpc(config_path: str | Path) -> tuple[BareECGCPC, Any, LoadRepo
     released_state = _load_checkpoint_state(checkpoint)
     wanted_prefixes = ("ts_encoder.encoder.", "ts_encoder.predictor.")
     model_state = model.state_dict()
-    parameter_names = {name for name, _ in model.named_parameters()}
-    buffer_names = {name for name, _ in model.named_buffers()}
+    named_parameters = dict(model.named_parameters())
+    named_buffers = dict(model.named_buffers())
+    parameter_names = set(named_parameters)
+    buffer_names = set(named_buffers)
 
-    loadable: dict[str, torch.Tensor] = {}
-    resizeable_s4_caches: dict[str, torch.Tensor] = {}
+    parameter_tensors: dict[str, torch.Tensor] = {}
+    buffer_tensors: dict[str, torch.Tensor] = {}
+    s4_cache_tensors: dict[str, torch.Tensor] = {}
     source_keys = 0
     unknown_source_keys: list[str] = []
     parameter_shape_mismatches: list[str] = []
@@ -229,20 +268,37 @@ def load_bare_ecgcpc(config_path: str | Path) -> tuple[BareECGCPC, Any, LoadRepo
 
         target_shape = tuple(model_state[source_name].shape)
         source_shape = tuple(tensor.shape)
-        if target_shape == source_shape:
-            loadable[source_name] = tensor
+
+        # Length-dependent S4 caches are always handled separately, even if a
+        # future checkpoint happens to have the same downstream cache length.
+        if _is_s4_fft_cache(source_name):
+            if source_name not in buffer_names:
+                other_buffer_shape_mismatches.append(
+                    f"Known S4 cache is not a registered buffer: {source_name}"
+                )
+            else:
+                s4_cache_tensors[source_name] = tensor
             continue
 
         if source_name in parameter_names:
-            parameter_shape_mismatches.append(
-                f"{source_name}: model={target_shape} checkpoint={source_shape}"
-            )
-        elif source_name in buffer_names and _is_s4_fft_cache(source_name):
-            resizeable_s4_caches[source_name] = tensor
-        else:
-            other_buffer_shape_mismatches.append(
-                f"{source_name}: model={target_shape} checkpoint={source_shape}"
-            )
+            if target_shape != source_shape:
+                parameter_shape_mismatches.append(
+                    f"{source_name}: model={target_shape} checkpoint={source_shape}"
+                )
+            else:
+                parameter_tensors[source_name] = tensor
+            continue
+
+        if source_name in buffer_names:
+            if target_shape != source_shape:
+                other_buffer_shape_mismatches.append(
+                    f"{source_name}: model={target_shape} checkpoint={source_shape}"
+                )
+            else:
+                buffer_tensors[source_name] = tensor
+            continue
+
+        unknown_source_keys.append(source_name)
 
     if source_keys == 0:
         raise RuntimeError(
@@ -256,7 +312,7 @@ def load_bare_ecgcpc(config_path: str | Path) -> tuple[BareECGCPC, Any, LoadRepo
         )
     if other_buffer_shape_mismatches:
         raise RuntimeError(
-            "Unexpected non-cache ECG-CPC buffer shape mismatch:\n"
+            "Unexpected ECG-CPC buffer mismatch:\n"
             + "\n".join(other_buffer_shape_mismatches[:30])
         )
     if unknown_source_keys:
@@ -265,15 +321,25 @@ def load_bare_ecgcpc(config_path: str | Path) -> tuple[BareECGCPC, Any, LoadRepo
             f"First 30: {unknown_source_keys[:30]}"
         )
 
-    # Load every same-shaped tensor first. The known S4 length caches are
-    # restored separately because torch.nn.Module.load_state_dict rejects their
-    # legitimate checkpoint-vs-downstream shape difference.
-    incompatible = model.load_state_dict(loadable, strict=False)
+    # Do NOT call load_state_dict here. S4 B/P/w buffers can be expanded views
+    # with overlapping storage, and PyTorch's copy_ based loader rejects them.
+    # Parameters and buffers are installed explicitly from cloned checkpoint
+    # tensors instead.
+    with torch.no_grad():
+        for name, source in parameter_tensors.items():
+            target = named_parameters[name]
+            target.data = source.detach().to(
+                device=target.device, dtype=target.dtype
+            ).clone()
+
+    for name, source in buffer_tensors.items():
+        _replace_registered_buffer(model, name, source)
+
     resized_s4_caches, s4_cache_lengths = _restore_s4_fft_caches(
-        model, resizeable_s4_caches
+        model, s4_cache_tensors
     )
 
-    loaded_parameter_names = parameter_names.intersection(loadable.keys())
+    loaded_parameter_names = set(parameter_tensors)
     missing_parameter_names = sorted(parameter_names - loaded_parameter_names)
     total_numel = sum(p.numel() for _, p in model.named_parameters())
     loaded_numel = sum(
@@ -281,24 +347,31 @@ def load_bare_ecgcpc(config_path: str | Path) -> tuple[BareECGCPC, Any, LoadRepo
     )
     coverage = loaded_numel / max(total_numel, 1)
 
-    # Frozen V3-A is valid only if all trainable foundation-model parameters
-    # are represented by the official checkpoint. Buffers are audited above
-    # separately and do not enter parameter coverage.
     if coverage < 0.999999 or missing_parameter_names:
         raise RuntimeError(
             f"ECG-CPC trainable parameter coverage is not 100%: {coverage:.6%}. "
             f"Missing parameters (first 30): {missing_parameter_names[:30]}"
         )
 
-    # Each of the four S4 layers should have checkpoint omega/z caches. If the
-    # release architecture changes, fail rather than silently proceeding.
     if len(s4_cache_lengths) != int(cfg.ts.pred.layers):
         raise RuntimeError(
             f"Expected S4 cache state for {int(cfg.ts.pred.layers)} layers, "
             f"found {len(s4_cache_lengths)}: {s4_cache_lengths}"
         )
 
-    report = LoadReport(
+    # Numerical audit after installation. This catches silent assignment bugs,
+    # including overlapping-buffer and cache restoration errors.
+    installed = {}
+    installed.update(parameter_tensors)
+    installed.update(buffer_tensors)
+    installed.update(s4_cache_tensors)
+    verified_count = _verify_exact_checkpoint_values(model, installed)
+
+    for p in model.parameters():
+        p.requires_grad_(False)
+    model.eval()
+
+    return model, cfg, LoadReport(
         checkpoint=str(checkpoint),
         loaded_parameter_tensors=len(loaded_parameter_names),
         total_parameter_tensors=len(parameter_names),
@@ -306,12 +379,9 @@ def load_bare_ecgcpc(config_path: str | Path) -> tuple[BareECGCPC, Any, LoadRepo
         total_parameter_numel=int(total_numel),
         parameter_coverage=float(coverage),
         missing_parameter_names=missing_parameter_names,
-        unexpected_keys=list(incompatible.unexpected_keys),
+        unexpected_keys=[],
         resized_s4_cache_buffers=resized_s4_caches,
         s4_cache_lengths=s4_cache_lengths,
+        loaded_buffer_tensors=len(buffer_tensors) + len(s4_cache_tensors),
+        verified_backbone_tensors=verified_count,
     )
-
-    for p in model.parameters():
-        p.requires_grad_(False)
-    model.eval()
-    return model, cfg, report
