@@ -15,99 +15,80 @@ else
   git -C "${BENCHMARK_DIR}" pull --ff-only
 fi
 
-# Do not replace Colab's existing torch install. These are the lightweight
-# runtime dependencies needed by the official ECG-CPC config/model loader.
-python -m pip install -q --upgrade \
-  hydra-core omegaconf einops pytorch-lightning wfdb scipy scikit-learn matplotlib pyyaml requests
+# Match the lightweight runtime pieces used by the official ICLR 2026
+# ECG-FM benchmarking environment, while deliberately leaving Colab's torch
+# installation untouched. Pin requests back to Colab's required version.
+python -m pip install -q \
+  "requests==2.32.4" \
+  "lightning==2.5.2" \
+  "pytorch-lightning==2.5.2" \
+  "pykeops==2.3" \
+  "keopscore==2.3" \
+  "hydra-core==1.3.2" \
+  "omegaconf==2.3.0" \
+  "einops==0.8.1" \
+  wfdb scipy scikit-learn matplotlib pyyaml
 
 mkdir -p "${CHECKPOINT_DIR}"
 
 if ! find "${CHECKPOINT_DIR}" -type f -name '*.yaml' -print -quit | grep -q .; then
   printf '\nDownloading the official ECG-CPC checkpoint archive through the Figshare API...\n'
   rm -f "${ZIP_PATH}"
-
   python - <<PY
 from pathlib import Path
+import json
 import time
-import zipfile
-import requests
-
-article_id = 30192604
-file_id = 58173919
-archive = Path("${ZIP_PATH}")
-
-session = requests.Session()
-session.headers.update({"User-Agent": "hypok-v3-colab/1.0"})
-
-meta_url = f"https://api.figshare.com/v2/articles/{article_id}"
-resp = session.get(meta_url, timeout=60)
-resp.raise_for_status()
-meta = resp.json()
-files = meta.get("files", [])
-match = next((f for f in files if int(f.get("id", -1)) == file_id), None)
-if match is None:
-    available = [(f.get("id"), f.get("name")) for f in files]
-    raise RuntimeError(
-        f"Figshare article {article_id} does not contain file {file_id}. "
-        f"Available files: {available}"
-    )
-
-download_url = match.get("download_url") or f"https://ndownloader.figshare.com/files/{file_id}"
-print("Figshare file:", match.get("name"))
-print("Expected bytes:", match.get("size"))
-print("Download URL:", download_url)
-
-last_error = None
-for attempt in range(1, 6):
-    try:
-        with session.get(download_url, stream=True, allow_redirects=True, timeout=(30, 300)) as r:
-            print(f"Attempt {attempt}: HTTP {r.status_code}")
-            if r.status_code == 202:
-                last_error = RuntimeError("Figshare returned HTTP 202; retrying")
-                time.sleep(5 * attempt)
-                continue
-            r.raise_for_status()
-            with archive.open("wb") as handle:
-                for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
-                    if chunk:
-                        handle.write(chunk)
-        if archive.exists() and archive.stat().st_size > 0:
-            break
-    except Exception as exc:
-        last_error = exc
-        if archive.exists():
-            archive.unlink()
-        time.sleep(5 * attempt)
-else:
-    raise RuntimeError(f"Failed to download ECG-CPC checkpoint: {last_error}")
-
-print("Downloaded bytes:", archive.stat().st_size)
-expected = match.get("size")
-if expected and archive.stat().st_size != int(expected):
-    print(
-        "WARNING: downloaded size differs from Figshare metadata:",
-        archive.stat().st_size,
-        "vs",
-        expected,
-    )
-
-if not zipfile.is_zipfile(archive):
-    # Keep a short diagnostic without dumping binary content.
-    prefix = archive.read_bytes()[:200]
-    raise RuntimeError(
-        f"Downloaded file is not a ZIP archive: {archive} "
-        f"({archive.stat().st_size} bytes). First bytes={prefix!r}"
-    )
-
-print("ZIP validation PASS")
-PY
-
-  python - <<PY
-from pathlib import Path
+import urllib.request
 import zipfile
 
+ARTICLE_ID = 30192604
+FILE_ID = 58173919
 archive = Path("${ZIP_PATH}")
 out = Path("${CHECKPOINT_DIR}")
+
+api_url = f"https://api.figshare.com/v2/articles/{ARTICLE_ID}"
+with urllib.request.urlopen(api_url, timeout=60) as r:
+    article = json.load(r)
+files = article.get("files", [])
+entry = next((f for f in files if int(f.get("id", -1)) == FILE_ID), None)
+if entry is None:
+    raise RuntimeError(f"Figshare file id {FILE_ID} not found in article {ARTICLE_ID}")
+
+url = entry.get("download_url")
+expected = int(entry.get("size") or 0)
+print("Figshare file:", entry.get("name"))
+print("Expected bytes:", expected)
+print("Download URL:", url)
+
+last_error = None
+for attempt in range(1, 4):
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=180) as r, archive.open("wb") as f:
+            status = getattr(r, "status", None)
+            print(f"Attempt {attempt}: HTTP {status}")
+            while True:
+                chunk = r.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+        size = archive.stat().st_size
+        print("Downloaded bytes:", size)
+        if expected and size != expected:
+            raise RuntimeError(f"Size mismatch: got {size}, expected {expected}")
+        if not zipfile.is_zipfile(archive):
+            raise RuntimeError(f"Downloaded file is not a ZIP archive: {archive}")
+        print("ZIP validation PASS")
+        break
+    except Exception as e:
+        last_error = e
+        if archive.exists():
+            archive.unlink()
+        if attempt == 3:
+            raise
+        print("Download failed, retrying:", repr(e))
+        time.sleep(2 * attempt)
+
 with zipfile.ZipFile(archive) as zf:
     zf.extractall(out)
 print(f"Extracted ECG-CPC checkpoint archive to {out}")
@@ -115,14 +96,14 @@ PY
 fi
 
 # The released YAML can retain the authors' absolute checkpoint location.
-# Patch only trainer.pretrained to the local, largest model checkpoint while
-# preserving the rest of the official configuration verbatim.
+# Patch only trainer.pretrained to the local largest model checkpoint while
+# preserving the rest of the official configuration.
 python - <<PY
 from pathlib import Path
 from omegaconf import OmegaConf
 
 root = Path("${CHECKPOINT_DIR}")
-yamls = sorted(root.rglob("*.yaml"))
+yamls = sorted(p for p in root.rglob("*.yaml") if p.name != "ecgcpc_colab_patched.yaml")
 if not yamls:
     raise FileNotFoundError(f"No ECG-CPC YAML config found under {root}")
 preferred = [p for p in yamls if "config_last_11597276_ckpt" in p.name]
@@ -145,6 +126,18 @@ print("Official config :", config)
 print("Checkpoint      :", checkpoint)
 print("Patched config  :", patched)
 print("Checkpoint GiB  :", round(checkpoint.stat().st_size / 1024**3, 3))
+PY
+
+printf '\n===== DEPENDENCY CHECK =====\n'
+python - <<'PY'
+import requests
+import lightning
+import lightning.pytorch
+import pykeops
+print("requests:", requests.__version__)
+print("lightning:", lightning.__version__)
+print("pykeops:", pykeops.__version__)
+print("DEPENDENCIES PASS")
 PY
 
 printf '\n===== IMPORT SMOKE TEST =====\n'
