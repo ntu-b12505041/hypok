@@ -29,6 +29,10 @@ def main() -> None:
         "V3-A validation ROC": "V4-A ECG-JEPA validation ROC",
         "V3-A validation confusion matrix": "V4-A ECG-JEPA validation confusion matrix",
         "V3-A SPECIALIST TRAINING PASS": "V4-A ECG-JEPA SPECIALIST TRAINING PASS",
+        'parser.add_argument("--pos-weight-mode", choices=["none", "sqrt"], default="sqrt")':
+            'parser.add_argument("--pos-weight-mode", choices=["none", "sqrt", "clipped_sqrt"], default="clipped_sqrt")',
+        'if args.pos_weight_mode == "sqrt":\n            pos_weight_value = math.sqrt(negatives / max(1.0, positives))\n        else:\n            pos_weight_value = 1.0':
+            'if args.pos_weight_mode == "sqrt":\n            pos_weight_value = math.sqrt(negatives / max(1.0, positives))\n        elif args.pos_weight_mode == "clipped_sqrt":\n            pos_weight_value = max(1.0, math.sqrt(negatives / max(1.0, positives)))\n        else:\n            pos_weight_value = 1.0',
     }
     for old, new in replacements.items():
         if old not in text:
